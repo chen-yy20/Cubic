@@ -13,6 +13,9 @@ SCRIPT_MAP = {
         # "teacache": "run_wan/teacache_generate.py",
         # "toca": "run_wan/toca_generate.py",
     },
+    "firered": {
+        "ori": "firered_exp/ori_generate.py",
+    }
 }
 
 
