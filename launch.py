@@ -9,12 +9,12 @@ import sys
 SCRIPT_MAP = {
     "wan": {
         "ori": "wan_exp/ori_generate.py",
-        # "pab": "run_wan/pab_generate.py",
-        # "teacache": "run_wan/teacache_generate.py",
-        # "toca": "run_wan/toca_generate.py",
     },
     "firered": {
         "ori": "firered_exp/ori_generate.py",
+    },
+    "flux2k": {
+        "ori": "flux2k_exp/ori_generate.py",
     }
 }
 

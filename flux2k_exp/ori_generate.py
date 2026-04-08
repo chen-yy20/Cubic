@@ -5,8 +5,8 @@ from pathlib import Path
 
 import torch
 
-from flux2_klein_4b.flux2_klein.pipeline import Flux2KleinPipeline
-from flux2_klein_4b.flux2_klein.transformer import Flux2Transformer2DModel
+from flux2_klein.pipeline import Flux2KleinPipeline
+from flux2_klein.transformer import Flux2Transformer2DModel
 from utils.results import get_prompt_id, save_params_and_metrics
 from utils.timer import get_timer, get_time_statistics_dict, init_timer, print_time_statistics
 
