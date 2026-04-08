@@ -790,7 +790,8 @@ class QwenImageEditPlusPipeline(DiffusionPipeline, QwenImageLoraLoaderMixin):
         with self.progress_bar(total=num_inference_steps) as progress_bar:
             progress_bar.set_description("Denoising")
             for i, t in enumerate(timesteps):
-                print(f"Denoising step: {i}", flush=True)
+                if i % 5 == 0:
+                    print(f"Denoising step: {i}", flush=True)
 
                 if self.interrupt:
                     continue

@@ -27,4 +27,10 @@ export WORLD_SIZE=${WORLD_SIZE:-$((NNODES * GPUS_PER_NODE))}
 
 export CUDA_DEVICE_MAX_CONNECTIONS=1
 
-exec python "$SCRIPT" "$@"
+PYTHON_BIN=${PYTHON_EXECUTABLE:-$(command -v python || command -v python3)}
+if [ -z "$PYTHON_BIN" ]; then
+    echo "No Python executable found. Set PYTHON_EXECUTABLE or ensure python/python3 is in PATH."
+    exit 127
+fi
+
+exec "$PYTHON_BIN" "$SCRIPT" "$@"
