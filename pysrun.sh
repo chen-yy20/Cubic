@@ -19,19 +19,6 @@ export NNODES=${NNODES:-1}
 export GPUS_PER_NODE=${GPUS_PER_NODE:-1}
 export MASTER_PORT=$(expr $RANDOM % 10000 + 50000)
 
-if [ -z "$PYTHON_EXECUTABLE" ]; then
-    if [ -x "$(pwd)/.venv/bin/python" ]; then
-        export PYTHON_EXECUTABLE="$(pwd)/.venv/bin/python"
-    else
-        export PYTHON_EXECUTABLE=$(command -v python || command -v python3)
-    fi
-fi
-
-if [ -z "$PYTHON_EXECUTABLE" ]; then
-    echo "Neither python nor python3 found in PATH"
-    exit 1
-fi
-
 srun \
     -p "${PARTITION:-debug}" \
     -K \

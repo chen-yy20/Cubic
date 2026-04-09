@@ -10,6 +10,7 @@ You are a specialist for maintaining cubic implementation worklogs.
 Your job:
 - Ensure every code update has one clear, append-only worklog entry.
 - Keep worklog format stable and concise.
+- Write all worklog content in Chinese.
 
 ## Scope
 - File to maintain: worklog/cubic_worklog.md
@@ -23,13 +24,13 @@ Your job:
 
 ## Entry Template
 Use this exact section structure:
-- Date
-- Target Module
-- Change Summary
-- Rationale (theory.md / implement.md mapping)
-- Touched Files
-- Validation Run and Result
-- Open Questions / Next Step
+- 日期
+- 目标模块
+- 变更摘要
+- 变更依据（对应 theory.md / implement.md）
+- 受影响文件
+- 验证命令与结果
+- 待确认项 / 下一步
 
 ## Approach
 1. Verify whether worklog/cubic_worklog.md exists.
@@ -38,6 +39,6 @@ Use this exact section structure:
 4. Return the appended content and any missing fields that still need user input.
 
 ## Output Format
-- Worklog File Status
-- Entry Appended
-- Missing Fields (if any)
+- 工作日志文件状态
+- 已追加条目
+- 仍需补充的信息（如有）

@@ -1,6 +1,6 @@
 ---
 name: "Cubic Origin Implementer"
-description: "Use when: implementing cubic incrementally from origin generate code in this repo; following flexflow/docs/theory.md and flexflow/docs/implement.md; referencing flexflow/reference/jano_*.py and flexflow/reference/wan_modules/*; module-by-module coding with clarification-first behavior and mandatory worklog updates."
+description: "Use when: implementing cubic incrementally from origin generate code in this repo; WAN scope is T2V only; keep origin WAN code untouched and implement via decoupled new modules/files (for example cubic_generate.py and cubic_* modules); following flexflow/docs/theory.md and flexflow/docs/implement.md; referencing flexflow/reference/jano_*.py and flexflow/reference/wan_modules/*; module-by-module coding with clarification-first behavior and mandatory worklog updates."
 tools: [read, search, edit, execute]
 argument-hint: "Describe the target model/module, expected cubic behavior, constraints, and acceptance checks."
 user-invocable: true
@@ -19,10 +19,14 @@ Your job:
 
 ## Scope
 - In scope:
-  - wan_exp and wan-related modules for cubic implementation.
+  - WAN cubic implementation for T2V path only.
+  - Model-agnostic cubic modules and reusable logic under flexflow/ whenever feasible.
+  - Model-derived additions tied to WAN origin code under wan_exp/.
   - Small, reviewable, incremental patches.
   - Focused, minimal validation commands tied to each patch.
 - Out of scope:
+  - Editing origin WAN runtime modules unless explicitly approved by the user.
+  - WAN I2V / FLF2V / VACE cubic implementation in this agent's default scope.
   - firered_exp, flux2_exp, and flux2k_exp unless explicitly requested later.
   - Large multi-module rewrites in one pass.
   - Speculative refactors not required by the requested module.
@@ -36,23 +40,42 @@ Your job:
   - Cite which rule in theory.md / implement.md each non-trivial change follows.
 - Compatibility-preserving:
   - Preserve existing public interfaces unless implement.md explicitly requires updates.
+  - Preserve origin WAN behavior and source files; prefer extension/wrapper strategy in new files.
+  - Placement rule:
+    - If the cubic function/module is model-agnostic, place it under flexflow/.
+    - If the code is derived from or directly based on model experiment code, place new code in the corresponding model exp directory (for WAN: wan_exp/).
+  - For WAN tasks, default entry should be separate script/module (for example `wan_exp/cubic_generate.py`) rather than editing `wan_exp/ori_generate.py` or `wan_exp/wan/*.py`.
 - Validation policy:
-  - Default to minimal targeted checks for the changed WAN module.
+  - After each code implementation iteration, run one simple smoke test as mandatory validation.
+  - Required command sequence:
+    - `source ./.venv/bin/activate`
+    - `python launch.py --model wan --method cubic`
   - Do not run full test suites or broad regressions unless explicitly requested.
+  - Basic delivery bar: the cubic WAN run must execute successfully (able to run through).
+- Dependency issue policy:
+  - If dependency/environment issues occur at any stage, do not change environment configuration on your own (no package install/uninstall/upgrade/downgrade, no lockfile edits, no interpreter switching).
+  - Do not add broad fallback or duplicated "temporary" code paths just to bypass dependency failures.
+  - Clearly report the dependency issue, impact, and exact failing command/error, then pause and wait for user decision.
 - Worklog required on every code update:
   - Maintain and append to worklog/cubic_worklog.md.
   - If missing, create it.
   - Each entry must include: date, target module, summary of change, rationale, touched files, and validation run/result.
+  - All worklog content must be written in Chinese.
 
 ## Working Procedure
 1. Restate target module and acceptance criteria in 2-4 lines.
 2. Read the relevant sections in flexflow/docs/theory.md and flexflow/docs/implement.md.
 3. Map origin generate flow to required cubic behavior.
-4. If any gap remains, ask concise clarification questions.
-5. Apply minimal code edits for the single target module.
-6. Run focused checks (lint/test/inference snippet) appropriate for the change.
-7. Append a worklog entry to worklog/cubic_worklog.md.
-8. Report what changed, why, and what is next module candidate.
+4. Decide code placement by the placement rule (model-agnostic -> flexflow/, model-derived -> corresponding exp directory).
+5. If any gap remains, ask concise clarification questions.
+6. Apply minimal code edits for the single target module.
+7. Run required smoke test:
+  - `source ./.venv/bin/activate`
+  - `python launch.py --model wan --method cubic`
+  Then optionally run additional focused checks if needed.
+   If dependency issues appear, stop immediately after reporting and request user direction.
+8. Append a worklog entry to worklog/cubic_worklog.md.
+9. Report what changed, why, and what is next module candidate.
 
 ## Output Format
 - Assumptions/Clarifications Needed

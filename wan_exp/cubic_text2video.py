@@ -1,0 +1,275 @@
+import gc
+import logging
+import math
+import random
+import sys
+from contextlib import contextmanager
+
+import torch
+import torch.cuda.amp as amp
+import torch.distributed as dist
+from tqdm import tqdm
+
+from flexflow import CurvatureMonitor, StraightnessEvaluator
+from utils.timer import get_timer
+from wan.text2video import (
+    FlowDPMSolverMultistepScheduler,
+    FlowUniPCMultistepScheduler,
+    WanT2V,
+    get_sampling_sigmas,
+    retrieve_timesteps,
+)
+
+
+class CubicWanT2V(WanT2V):
+    """Decoupled Cubic T2V pipeline that keeps origin Wan modules untouched."""
+
+    _PHASE_WARMUP_FRACTION = 0.15
+    _PHASE_COOLDOWN_FRACTION = 0.15
+    _PHASE_ANCHOR_INTERVAL = 8
+
+    def __init__(self, *args, **kwargs):
+        super().__init__(*args, **kwargs)
+        self.monitor = CurvatureMonitor(self.config)
+        self.straightness = StraightnessEvaluator(self.config)
+
+    def _get_inference_phase(self, step, total_steps):
+        if total_steps <= 0:
+            return 'phase4_cooldown'
+
+        warmup_steps = max(
+            0, int(math.floor(total_steps * self._PHASE_WARMUP_FRACTION)))
+        cooldown_steps = max(
+            0, int(math.floor(total_steps * self._PHASE_COOLDOWN_FRACTION)))
+        cooldown_start = max(0, total_steps - cooldown_steps)
+
+        if step < warmup_steps:
+            return 'phase1_warmup'
+
+        if step >= cooldown_start:
+            return 'phase4_cooldown'
+
+        anchor_interval = max(1, int(self._PHASE_ANCHOR_INTERVAL))
+        if (step - warmup_steps) % anchor_interval == 0:
+            return 'phase2_cruise_anchor'
+        return 'phase3_cruise_selective'
+
+    def generate(self,
+                 input_prompt,
+                 size=(1280, 720),
+                 frame_num=81,
+                 shift=5.0,
+                 sample_solver='unipc',
+                 sampling_steps=50,
+                 guide_scale=5.0,
+                 n_prompt='',
+                 seed=-1,
+                 offload_model=True,
+                 results_dir=None,
+                 eval_straightness=False):
+        f_num = frame_num
+        target_shape = (self.vae.model.z_dim, (f_num - 1) // self.vae_stride[0] + 1,
+                        size[1] // self.vae_stride[1],
+                        size[0] // self.vae_stride[2])
+
+        seq_len = math.ceil((target_shape[2] * target_shape[3]) /
+                            (self.patch_size[1] * self.patch_size[2]) *
+                            target_shape[1] / self.sp_size) * self.sp_size
+
+        if n_prompt == '':
+            n_prompt = self.sample_neg_prompt
+        seed = seed if seed >= 0 else random.randint(0, sys.maxsize)
+        seed_g = torch.Generator(device=self.device)
+        seed_g.manual_seed(seed)
+
+        self.monitor.reset()
+        self.straightness.reset()
+
+        if not self.t5_cpu:
+            self.text_encoder.model.to(self.device)
+            context = self.text_encoder([input_prompt], self.device)
+            context_null = self.text_encoder([n_prompt], self.device)
+            if offload_model:
+                self.text_encoder.model.cpu()
+        else:
+            context = self.text_encoder([input_prompt], torch.device('cpu'))
+            context_null = self.text_encoder([n_prompt], torch.device('cpu'))
+            context = [t.to(self.device) for t in context]
+            context_null = [t.to(self.device) for t in context_null]
+
+        noise = [
+            torch.randn(
+                target_shape[0],
+                target_shape[1],
+                target_shape[2],
+                target_shape[3],
+                dtype=torch.float32,
+                device=self.device,
+                generator=seed_g)
+        ]
+
+        @contextmanager
+        def noop_no_sync():
+            yield
+
+        no_sync = getattr(self.model, 'no_sync', noop_no_sync)
+
+        with amp.autocast(dtype=self.param_dtype), torch.no_grad(), no_sync():
+            if sample_solver == 'unipc':
+                sample_scheduler = FlowUniPCMultistepScheduler(
+                    num_train_timesteps=self.num_train_timesteps,
+                    shift=1,
+                    use_dynamic_shifting=False)
+                sample_scheduler.set_timesteps(
+                    sampling_steps, device=self.device, shift=shift)
+                timesteps = sample_scheduler.timesteps
+            elif sample_solver == 'dpm++':
+                sample_scheduler = FlowDPMSolverMultistepScheduler(
+                    num_train_timesteps=self.num_train_timesteps,
+                    shift=1,
+                    use_dynamic_shifting=False)
+                sampling_sigmas = get_sampling_sigmas(sampling_steps, shift)
+                timesteps, _ = retrieve_timesteps(
+                    sample_scheduler,
+                    device=self.device,
+                    sigmas=sampling_sigmas)
+            else:
+                raise NotImplementedError('Unsupported solver.')
+
+            latents = noise
+            arg_c = {'context': context, 'seq_len': seq_len}
+            arg_null = {'context': context_null, 'seq_len': seq_len}
+
+            with get_timer('generate_e2e'):
+                warmup_steps = max(
+                    0,
+                    int(math.floor(len(timesteps) * self._PHASE_WARMUP_FRACTION)),
+                )
+                for step, t in enumerate(tqdm(timesteps)):
+                    phase = self._get_inference_phase(step, len(timesteps))
+                    if self.rank == 0:
+                        logging.info(
+                            '[wan-phase] step=%d/%d phase=%s',
+                            step,
+                            len(timesteps) - 1,
+                            phase,
+                        )
+
+                    latent_model_input = latents
+                    timestep = [t]
+                    timestep = torch.stack(timestep)
+
+                    self.model.to(self.device)
+                    noise_pred_cond = self.model(
+                        latent_model_input, t=timestep, **arg_c)[0]
+                    noise_pred_uncond = self.model(
+                        latent_model_input, t=timestep, **arg_null)[0]
+
+                    noise_pred = noise_pred_uncond + guide_scale * (
+                        noise_pred_cond - noise_pred_uncond)
+
+                    # Monitor updates at warmup tail and cruise anchors.
+                    is_last_warmup = warmup_steps > 0 and phase == 'phase1_warmup' and step == warmup_steps - 1
+                    is_cruise_anchor = phase == 'phase2_cruise_anchor'
+                    if is_last_warmup or is_cruise_anchor:
+                        t_unit = self._normalize_t_to_unit_interval(t)
+                        curvature_map = self.monitor.update(
+                            x=latents[0].unsqueeze(0),
+                            v=noise_pred.unsqueeze(0),
+                            t=t_unit,
+                            step_idx=step,
+                        )
+                        if self.rank == 0 and curvature_map is not None:
+                            logging.info(
+                                '[wan-monitor] step=%d curvature_map=%s mean=%.6e',
+                                step,
+                                tuple(curvature_map.shape),
+                                float(curvature_map.float().mean().item()),
+                            )
+
+                        if eval_straightness:
+                            velocity_fn = self._make_velocity_fn(
+                                arg_c=arg_c,
+                                arg_null=arg_null,
+                                guide_scale=guide_scale,
+                            )
+                            straightness_record = self.straightness.update(
+                                x=latents[0].unsqueeze(0),
+                                v=noise_pred.unsqueeze(0),
+                                t=t_unit,
+                                step_idx=step,
+                                velocity_fn=velocity_fn,
+                            )
+                            if self.rank == 0 and straightness_record is not None:
+                                logging.info(
+                                    '[wan-straightness] step=%d corr=%.6f mean_ratio=%.6f mean_gt=%.6e mean_proxy=%.6e',
+                                    step,
+                                    straightness_record.corr,
+                                    straightness_record.mean_ratio,
+                                    straightness_record.mean_curvature_gt,
+                                    straightness_record.mean_proxy_curvature,
+                                )
+
+                    temp_x0 = sample_scheduler.step(
+                        noise_pred.unsqueeze(0),
+                        t,
+                        latents[0].unsqueeze(0),
+                        return_dict=False,
+                        generator=seed_g)[0]
+                    latents = [temp_x0.squeeze(0)]
+
+            x0 = latents
+            if offload_model:
+                self.model.cpu()
+                torch.cuda.empty_cache()
+            if self.rank == 0:
+                videos = self.vae.decode(x0)
+
+        if self.rank == 0 and results_dir:
+            self.monitor.export_visualizations(results_dir)
+            logging.info('[wan-monitor] curvature visualizations saved to %s', results_dir)
+
+            if eval_straightness:
+                self.straightness.export_visualization(results_dir)
+                logging.info('[wan-straightness] overview saved to %s', results_dir)
+
+        del noise, latents
+        del sample_scheduler
+        if offload_model:
+            gc.collect()
+            torch.cuda.synchronize()
+        if dist.is_initialized():
+            dist.barrier()
+
+        return videos[0] if self.rank == 0 else None
+
+    def _normalize_t_to_unit_interval(self, t):
+        """Normalize scheduler timestep to [0, 1] expected by monitor equations."""
+        if isinstance(t, torch.Tensor):
+            if t.numel() == 0:
+                return 0.0
+            t_val = float(t.detach().reshape(-1)[0].item())
+        else:
+            t_val = float(t)
+
+        if t_val > 1.0:
+            denom = max(1.0, float(self.num_train_timesteps - 1))
+            t_val = t_val / denom
+        return max(0.0, min(1.0, t_val))
+
+    def _unit_to_model_timestep(self, t_unit):
+        t_unit = max(0.0, min(1.0, float(t_unit)))
+        return t_unit * float(self.num_train_timesteps - 1)
+
+    def _make_velocity_fn(self, arg_c, arg_null, guide_scale):
+        def velocity_fn(x_query, t_unit_query):
+            t_model = self._unit_to_model_timestep(t_unit_query)
+            timestep = torch.tensor([t_model], dtype=torch.float32, device=self.device)
+
+            latent_model_input = [x_query[0]]
+            noise_pred_cond = self.model(latent_model_input, t=timestep, **arg_c)[0]
+            noise_pred_uncond = self.model(latent_model_input, t=timestep, **arg_null)[0]
+            noise_pred = noise_pred_uncond + guide_scale * (noise_pred_cond - noise_pred_uncond)
+            return noise_pred.unsqueeze(0)
+
+        return velocity_fn

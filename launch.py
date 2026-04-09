@@ -9,6 +9,7 @@ import sys
 SCRIPT_MAP = {
     "wan": {
         "ori": "wan_exp/ori_generate.py",
+        "cubic": "wan_exp/cubic_generate.py",
     },
     "firered": {
         "ori": "firered_exp/ori_generate.py",
