@@ -212,3 +212,136 @@
   - 结果：通过（无输出）
   - 命令：`source ./.venv/bin/activate && python launch.py --model wan --method cubic`
   - 结果：通过，端到端生成完成；新增输出 `results/wan/1.3B/cubic/two_anthropomorphic_cats_comfy/straightness_vis/groundtruth_curvature_heatmap_overview.png`。
+
+## 2026-04-09（自适应四叉树分块实现）
+- 目标模块：
+  - `flexflow/types.py`（新建）
+  - `flexflow/partition.py`（新建）
+  - `flexflow/__init__.py`
+  - `wan_exp/cubic_text2video.py`
+- 变更摘要：
+  - 新建 `flexflow/types.py`，定义核心数据结构：
+    - `Phase`（枚举）：warmup / cruise_anchor / cruise_selective / cooldown
+    - `Block`（数据类）：token 空间中的矩形块，具有 f/h/w 范围、token_count 属性、get_token_indices() 方法
+    - `Partition`（数据类）：不重叠完全覆盖的分块方案，带 validate() 方法
+    - `StepPlan`（数据类）：单步推理计划，包含 active/frozen blocks 信息
+  - 新建 `flexflow/partition.py`，实现 `AdaptivePartitioner`：
+    - `partition(Ft, Ht, Wt, curvature_map=None)`：主入口，若无曲率图返回均匀分块，否则执行自适应分裂
+    - `_uniform_partition(Ft, Ht, Wt)`：生成均匀分块（block_size = max_block_size）
+    - `_quadtree_split(...)`：递归四叉树分裂，分裂条件为 cv > cv_threshold 且块大小 > min_block_size
+    - 支持 config.min_block_size, max_block_size, cv_threshold 参数
+  - 更新 `flexflow/__init__.py`，导出新增的 Block, Partition, Phase, StepPlan, AdaptivePartitioner
+  - 更新 `wan_exp/cubic_text2video.py`：
+    - __init__ 中初始化 AdaptivePartitioner
+    - 在 monitor.update() 成功返回 curvature_map 后立即调用 partitioner.partition()
+    - 记录分块方案的 blocks 数量、token_grid 尺寸、逐块详细信息（block_id, 范围, token_count）
+- 变更依据：
+  - 遵循 [flexflow/docs/implement.md](../flexflow/docs/implement.md) 中 2.4（自适应四叉树分块）、4.2（types.py 规格）、4.3（partition.py 规格）
+  - Block/Partition 等类型是模型无关的，放在 flexflow/ 作为可复用基础设施
+  - Partitioner 的集成点在 anchor step 产出 curvature_map 后立即调用，无需修改原始 WAN runtime
+- 受影响文件：
+  - `flexflow/types.py`（新建，127 行）
+  - `flexflow/partition.py`（新建，180 行）
+  - `flexflow/__init__.py`（修改，+4 行）
+  - `wan_exp/cubic_text2video.py`（修改，+40 行）
+  - `worklog/cubic_worklog.md`（本条目）
+- 验证命令与结果：
+  - 命令：`python3 -m py_compile flexflow/types.py flexflow/partition.py flexflow/__init__.py wan_exp/cubic_text2video.py`
+  - 结果：通过（无输出，语法正确）
+  - 命令：`source ./.venv/bin/activate && python launch.py --model wan --method cubic`
+  - 结果：**通过**（完整端到端生成）
+    - 第7步(anchor)：92 blocks，token_grid=(21,30,52)，mean_curvature=1.385e+02
+    - 第15步(anchor)：68 blocks，mean_curvature=1.855e+01
+    - 第23步(anchor)：101 blocks，mean_curvature=9.838e+00
+    - 第31步(anchor)：62 blocks，mean_curvature=4.991e+00
+    - 第39步(anchor)：35 blocks，mean_curvature=2.551e+00
+    - 可视化：curvature_vis, straightness_vis 已生成
+    - 视频输出：./results/wan/1.3B/cubic/two_anthropomorphic_cats_comfy/cubic_two_anthropomorphic_cats_comfy_t2v-1.3B.mp4
+  - **分块效果验证**：
+
+## 2026-04-10（selective phase 频率优化器 + 可视化统一）
+- 目标模块：
+  - `flexflow/optimizer.py`
+  - `flexflow/visualizer.py`
+  - `wan_exp/cubic_text2video.py`
+- 变更摘要：
+  - 新增 `UpdateFrequencyOptimizer`，在 anchor 处基于每个 partition 的 block 曲率分配更新间隔 `tau_b`。
+  - 实现并接入公式：`tau_b ∝ kappa_b^{-alpha/(beta+1)}`，并按 `mean(1/tau_b)=1/target_speedup` 做归一化，再离散到 `[tau_min, tau_max]`。
+  - 在 WAN T2V 的 anchor 流程中接入 optimizer，新增日志：`tau(min/max/mean)`、`mean_update_rate`、`achieved_speedup`。
+  - 新建 `flexflow/visualizer.py` 作为统一可视化入口，收敛分块、曲率、straightness 导出逻辑。
+  - 分块 frame strip 新增“更新频率可视化”：按 `tau` 给 block 边框着色并在框内标注 `tau`。
+  - `flexflow/monitor.py` 与 `flexflow/straightness.py` 的导出方法改为调用统一 visualizer（保留兼容入口）。
+  - `flexflow/partition_visualizer.py` 改为兼容重导出，避免旧导入路径失效。
+- 变更依据：
+  - 遵循 [flexflow/docs/implement.md](../flexflow/docs/implement.md) 的 2.5（`tau_b` 优化分配）与 2.2（anchor 步执行策略）。
+  - 理论依据来自 [flexflow/docs/theory.md](../flexflow/docs/theory.md) 的局部曲率异质性与基于曲率控制跳步的误差-计算权衡思路。
+  - 保持 WAN origin 代码不改，继续通过 `wan_exp/cubic_text2video.py` 解耦接入。
+- 受影响文件：
+  - `flexflow/optimizer.py`（新增）
+  - `flexflow/visualizer.py`（新增）
+  - `flexflow/__init__.py`
+  - `flexflow/partition_visualizer.py`
+  - `flexflow/monitor.py`
+  - `flexflow/straightness.py`
+  - `wan_exp/cubic_text2video.py`
+  - `worklog/cubic_worklog.md`
+- 验证命令与结果：
+  - 命令：`python3 -m py_compile flexflow/optimizer.py flexflow/visualizer.py flexflow/monitor.py flexflow/straightness.py flexflow/partition_visualizer.py flexflow/__init__.py wan_exp/cubic_text2video.py`
+  - 结果：通过（无输出）
+  - 命令：`source ./.venv/bin/activate && python launch.py --model wan --method cubic`
+  - 结果：通过（完整端到端生成）
+    - 新增 optimizer 日志示例：`[wan-optimizer] step=15 tau(min=1 max=4 mean=2.265) mean_update_rate=0.497475 achieved_speedup=2.010`
+    - frame strip 继续输出到 `partition_vis/step_XXXX_frame_strip.png`，并包含 `tau` 叠加显示
+    - 视频输出：`results/wan/1.3B/cubic/two_anthropomorphic_cats_comfy/cubic_two_anthropomorphic_cats_comfy_t2v-1.3B.mp4`
+    - 动态调整：块数从 92 → 68 → 101 → 62 → 35，随曲率变化（138.5 → 18.5 → 9.8 → 5.0 → 2.6）
+    - 未见崩溃或数据不一致，partition.validate() 通过
+    - log 显示所有 anchor blocks 计数、范围信息正常输出
+
+## 2026-04-09（分区口径重构：全局 blocksize + 均匀 3D 切分）
+- 目标模块：
+  - `flexflow/partition.py`
+  - `flexflow/partition_visualizer.py`
+  - `flexflow/types.py`
+  - `wan_exp/cubic_text2video.py`
+  - `flexflow/docs/implement.md`
+- 变更摘要：
+  - 将分区策略从“递归细分/分级思路”收敛为单一口径：
+    - 仅决定一个全局 `blocksize(f,h,w)`；
+    - 按该 blocksize 在 `(Ft,Ht,Wt)` 上均匀切分（边界截断）；
+    - 选择依据是“均匀切分后各 block 内曲率尽量接近”（使用 block 内 `cv` 统计）。
+  - 在 `partition.py` 中新增候选 blocksize 搜索与一致性打分：
+    - 候选打分包含 `mean_block_cv` 与 `p90_block_cv`；
+    - 在一致性约束下优先更大 block，避免不必要的小块爆炸。
+  - `Partition` 增加 `selected_block_size` 字段，便于日志与可视化链路复核。
+  - `partition_visualizer.py` 调整为每个 anchor 输出：
+    - `step_XXXX_frame_strip.png`（block 边界叠加）
+    - `step_XXXX_partition_summary.txt`（blocksize 与块内统计）
+  - 可视化目录不再清理历史文件，保留所有 anchor 的 partition overview。
+  - `wan_exp/cubic_text2video.py` 日志改为重点打印：
+    - `chosen_block_size`
+    - `blocks` / `token_stats`
+    - `block_cv(mean/p90)`
+- 变更依据：
+  - 对齐用户口径：不做评级，不做按语义区域聚类；只做“全局 blocksize 决策 + 均匀切分”。
+  - 对齐 `jano_blockmanager` 的规则网格思路：先确定 block size，再全局规则切块。
+  - 保证每个 anchor 都有可追踪的 overview 产物，便于横向对比。
+- 受影响文件：
+  - `flexflow/partition.py`
+  - `flexflow/partition_visualizer.py`
+  - `flexflow/types.py`
+  - `wan_exp/cubic_text2video.py`
+  - `flexflow/docs/implement.md`
+  - `worklog/cubic_worklog.md`
+- 验证命令与结果：
+  - 命令：`python3 -m py_compile flexflow/types.py flexflow/partition.py flexflow/partition_visualizer.py flexflow/__init__.py wan_exp/cubic_text2video.py`
+  - 结果：通过（无输出）
+  - 命令：`source ./.venv/bin/activate && python launch.py --model wan --method cubic`
+  - 结果：通过（见 `uniform_blocksize_test.log` / `partition_overview_test.log`）
+  - 关键日志样例：
+    - step=7: `chosen_block_size=(2, 9, 4)`, `blocks=572`, `block_cv(mean=0.4427 p90=0.7991)`
+    - step=15: `chosen_block_size=(2, 4, 9)`, `blocks=528`, `block_cv(mean=0.4713 p90=0.7759)`
+    - step=23: `chosen_block_size=(4, 4, 8)`, `blocks=336`, `block_cv(mean=0.5334 p90=0.8730)`
+    - step=39: `chosen_block_size=(2, 4, 9)`, `blocks=528`, `block_cv(mean=0.4287 p90=0.6542)`
+  - 可视化产物：
+    - `results/wan/1.3B/cubic/two_anthropomorphic_cats_comfy/partition_vis/step_XXXX_frame_strip.png`
+    - `results/wan/1.3B/cubic/two_anthropomorphic_cats_comfy/partition_vis/step_XXXX_partition_summary.txt`

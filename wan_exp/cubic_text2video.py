@@ -10,7 +10,13 @@ import torch.cuda.amp as amp
 import torch.distributed as dist
 from tqdm import tqdm
 
-from flexflow import CurvatureMonitor, StraightnessEvaluator
+from flexflow import (
+    CurvatureMonitor,
+    StraightnessEvaluator,
+    AdaptivePartitioner,
+    CubicVisualizer,
+    UpdateFrequencyOptimizer,
+)
 from utils.timer import get_timer
 from wan.text2video import (
     FlowDPMSolverMultistepScheduler,
@@ -32,6 +38,10 @@ class CubicWanT2V(WanT2V):
         super().__init__(*args, **kwargs)
         self.monitor = CurvatureMonitor(self.config)
         self.straightness = StraightnessEvaluator(self.config)
+        self.partitioner = AdaptivePartitioner(self.config)
+        self.frequency_optimizer = UpdateFrequencyOptimizer(self.config)
+        self.visualizer = CubicVisualizer(self.config)
+        self.current_partition = None
 
     def _get_inference_phase(self, step, total_steps):
         if total_steps <= 0:
@@ -187,6 +197,72 @@ class CubicWanT2V(WanT2V):
                                 float(curvature_map.float().mean().item()),
                             )
 
+                            # Partitioner: generate adaptive partitioning from curvature map
+                            Ft, Ht, Wt = curvature_map.shape
+                            self.current_partition = self.partitioner.partition(
+                                Ft=Ft, Ht=Ht, Wt=Wt, curvature_map=curvature_map
+                            )
+                            partition_debug = self.partitioner.describe_partition(
+                                self.current_partition,
+                                curvature_map=curvature_map,
+                            )
+                            logging.info(
+                                '[wan-partitioner] step=%d chosen_block_size=%s blocks=%d token_grid=(%d,%d,%d) token_stats(min=%d max=%d mean=%.2f) block_cv(mean=%.4f p90=%.4f)',
+                                step,
+                                partition_debug.chosen_block_size,
+                                partition_debug.block_count,
+                                Ft, Ht, Wt,
+                                partition_debug.block_token_min,
+                                partition_debug.block_token_max,
+                                partition_debug.block_token_mean,
+                                partition_debug.mean_block_cv,
+                                partition_debug.p90_block_cv,
+                            )
+                            for block in self.current_partition:
+                                logging.debug(
+                                    '[wan-partitioner-detail] block_id=%d f=[%d,%d) h=[%d,%d) w=[%d,%d) tokens=%d',
+                                    block.block_id,
+                                    block.f_start, block.f_end,
+                                    block.h_start, block.h_end,
+                                    block.w_start, block.w_end,
+                                    block.token_count,
+                                )
+
+                            # Partition visualization
+                            block_curvatures = self.monitor.get_block_curvatures(self.current_partition)
+                            frequency_plan = self.frequency_optimizer.optimize(
+                                partition=self.current_partition,
+                                block_curvatures=block_curvatures,
+                            )
+                            logging.info(
+                                '[wan-optimizer] step=%d tau(min=%d max=%d mean=%.3f) mean_update_rate=%.6f achieved_speedup=%.3f',
+                                step,
+                                frequency_plan.min_interval,
+                                frequency_plan.max_interval,
+                                frequency_plan.mean_interval,
+                                frequency_plan.mean_update_rate,
+                                frequency_plan.achieved_speedup,
+                            )
+
+                            partition_vis_info = self.visualizer.visualize_partition_and_frequency(
+                                partition=self.current_partition,
+                                curvature_map=curvature_map,
+                                block_curvatures=block_curvatures,
+                                block_intervals=frequency_plan.block_intervals,
+                                step_idx=step,
+                                output_dir=results_dir if results_dir else './results',
+                            )
+                            logging.info(
+                                '[wan-partition-vis] step=%d frame_strip_frames=%s summary=%s',
+                                step,
+                                partition_vis_info['frame_strip_frames'],
+                                partition_vis_info['summary_path'],
+                            )
+                            logging.info(
+                                '[wan-partition-vis] step=%d visualizations exported',
+                                step,
+                            )
+
                         if eval_straightness:
                             velocity_fn = self._make_velocity_fn(
                                 arg_c=arg_c,
@@ -226,11 +302,11 @@ class CubicWanT2V(WanT2V):
                 videos = self.vae.decode(x0)
 
         if self.rank == 0 and results_dir:
-            self.monitor.export_visualizations(results_dir)
+            self.visualizer.export_curvature_history(self.monitor.curvature_history, results_dir)
             logging.info('[wan-monitor] curvature visualizations saved to %s', results_dir)
 
             if eval_straightness:
-                self.straightness.export_visualization(results_dir)
+                self.visualizer.export_straightness_records(self.straightness.records, results_dir)
                 logging.info('[wan-straightness] overview saved to %s', results_dir)
 
         del noise, latents

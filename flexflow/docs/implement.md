@@ -17,6 +17,10 @@ Cubic 是一个面向 Flow-Matching DiT（Diffusion Transformer）的推理加�
 
 真正的 FLOPs 节省来自**稀疏 Token 计算**：在 DiT 的 Transformer 层中，仅对 active block 的 token 计算 Q/K/V 投影和 FFN，frozen block 的 token 通过 per-layer KV cache 参与 attention 的 K/V 端，但不计算 Q 也不过 FFN。
 
+> 当前 WAN T2V 解耦实现处于 **Stage-A（监测/验证）**：
+> - 已完成 phase 划分、anchor 采样、曲率监测与 straightness 验证链路；
+> - **尚未**在 WAN runtime 中执行 active/frozen token 的 selective sparse forward，因此当前版本不产生 selective sparse acceleration 的 FLOPs 节省。
+
 ### 1.3 前置假设
 
 - 模型为标准 DiT 架构：patch embedding → L 个 transformer block → unpatchify
@@ -68,19 +72,29 @@ $$κ_i = ||δ_i||2 / ((1 - t{k+M}) * |t_{k+M} - t_k| + eps)$$
 
 `κ_i` 越大，该位置的 ODE 轨迹越弯曲，越需要频繁更新。
 
-### 2.4 自适应四叉树分块
+### 2.4 全局 BlockSize 选择与均匀 3D 切分
 
 输入：曲率图 `κ ∈ R^{Ft × Ht × Wt}`（token 空间）  
-输出：一组不重叠、完全覆盖的块 `{Block_b}`
+输出：全局 block size `b=(bf,bh,bw)` 与均匀切分后的块集合 `{Block_b}`
 
-算法：对每一帧（或帧组），在 (Ht, Wt) 平面上做四叉树递归分裂。分裂条件：
+算法目标：Cubic 在 anchor step 只决策一个全局 `blocksize(f,h,w)`，随后在整个 latent/token grid 上按该尺寸均匀切分。
+
+候选评估流程：
+
+1. 枚举一组候选 `b=(bf,bh,bw)`（受 `min_block_size/max_block_size` 约束）。
+2. 对每个候选，执行均匀切分并计算每个 block 的内部曲率离散度：
 
 ```
-cv = std(κ[region]) / (mean(κ[region]) + eps)
-split if cv > cv_threshold AND region_size > min_block_size
+cv_block = std(κ_block) / (mean(κ_block) + eps)
 ```
 
-约束：所有块边长必须是 2 的幂次，且 ≥ min_block_size、≤ max_block_size。
+3. 统计候选的 `mean(cv_block)` 与 `p90(cv_block)`，优先选择“块内曲率更接近”的方案；当一致性相近时，优先更大的 block（减少块数）。
+
+约束：
+
+- 分区必须完全覆盖 `[0, Ft) × [0, Ht) × [0, Wt)`，无重叠无遗漏；
+- 所有 block 来自同一个全局 `blocksize`（边界块允许截断）；
+- 当前阶段不做曲率等级划分（no grading/rating）。
 
 ### 2.5 τ_b 优化分配
 
@@ -119,7 +133,7 @@ cubic/
 ├── init.py # 导出 CubicScheduler, CubicConfig
 ├── config.py # 超参数配置
 ├── types.py # 核心数据结构 Block, Partition, Phase
-├── partition.py # 自适应四叉树分块
+├── partition.py # 全局 blocksize 搜索 + 均匀 3D 切分
 ├── monitor.py # 曲率监测
 ├── optimizer.py # τ_b 优化分配
 ├── cache.py # KV cache + velocity cache 管理
@@ -127,6 +141,15 @@ cubic/
 ├── scheduler.py # 主调度器（唯一对外接口）
 └── utils.py # 工具函数
 ```
+
+### 3.2 WAN 解耦入口（当前实现）
+
+为保证“不改 origin runtime”，当前 WAN T2V 的 Cubic 解耦实现通过独立入口接入：
+
+- `wan_exp/cubic_text2video.py`：定义 `CubicWanT2V`，在不修改原 `wan.text2video.WanT2V` 代码的前提下，增加 phase 判定、monitor 更新、straightness 评估与可视化导出。
+- `wan_exp/cubic_generate.py`：实验入口脚本，实例化 `CubicWanT2V` 并运行生成流程。
+
+origin 的推理路径仍由 `wan_exp/wan/` 下原始模块保持，当前解耦实现通过新增文件并行接入。
 
 ---
 
@@ -168,8 +191,8 @@ class CubicConfig:
     target_speedup: float = 2.0          # ρ，平均每 ρ 步才做一次 full compute
 
     # --- 分块参数 ---
-    min_block_size: int = 2              # 四叉树最小块边长（token 单位）
-    max_block_size: int = 16             # 四叉树最大块边长（token 单位）
+    min_block_size: int = 2              # blocksize 搜索下限（token 单位）
+    max_block_size: int = 16             # blocksize 搜索上限（token 单位）
     cv_threshold: float = 0.5            # 变异系数阈值，越小分得越细
 
     # --- 曲率 → τ 映射 ---
@@ -296,7 +319,7 @@ class StepPlan:
 ### 4.3 `partition.py` 【保守参考`jano_blockmanager.py`】
 
 ```python
-"""自适应四叉树分块。"""
+"""全局 blocksize 搜索 + 均匀 3D 切分。"""
 
 import torch
 from typing import List, Optional
@@ -305,7 +328,7 @@ from .config import CubicConfig
 
 
 class AdaptivePartitioner:
-    """基于曲率图的自适应空间分块。"""
+    """基于曲率一致性的全局 blocksize 选择器。"""
 
     def __init__(self, config: CubicConfig):
         self.min_block_size = config.min_block_size
@@ -323,53 +346,55 @@ class AdaptivePartitioner:
         
         Args:
             Ft, Ht, Wt: token grid 尺寸
-            curvature_map: (Ft, Ht, Wt) 曲率图。若为 None，返回均匀分块。
+            curvature_map: (Ft, Ht, Wt) 曲率图。若为 None，使用默认 blocksize 均匀分块。
         
         Returns:
             Partition 对象
         """
         # 实现要点：
-        # 1. 若 curvature_map 为 None，调用 _uniform_partition
-        # 2. 否则，对 Ft 维度按 min_block_size 分段（或不分，每帧独立）
-        #    对每段在 (Ht, Wt) 平面上执行四叉树分裂
-        # 3. 返回 Partition
+        # 1. 若 curvature_map 为 None，使用默认 blocksize 做均匀切分
+        # 2. 否则，先枚举候选 blocksize，并计算每个候选下的块内 cv 统计
+        # 3. 选择块内曲率一致性最好的 blocksize
+        # 4. 按该 blocksize 对整个 Ft/Ht/Wt 做均匀 3D 切分
+        # 5. 返回 Partition（记录 selected_block_size）
 
-    def _uniform_partition(self, Ft, Ht, Wt) -> Partition:
-        """均匀分块，块大小为 max_block_size。"""
-        # 实现：三重循环，步长为 max_block_size（或 min(max_block_size, dim)）
-        # 注意处理不整除的边界
+    def _select_block_size(self, curvature_map) -> Tuple[int, int, int]:
+        """在候选 blocksize 中搜索曲率一致性最优解。"""
 
-    def _quadtree_split(
-        self,
-        curvature_map: torch.Tensor,   # (Ft, Ht, Wt)
-        f_start: int, f_end: int,
-        h_start: int, h_end: int,
-        w_start: int, w_end: int,
-        blocks: List[Block],
-        counter: List[int],            # 用 list 包装以支持闭包内修改
-    ):
-        """递归四叉树分裂。
-        
-        分裂判据：
-            region = curvature_map[f_start:f_end, h_start:h_end, w_start:w_end]
-            cv = region.std() / (region.mean() + 1e-8)
-            split = (cv > self.cv_threshold) 
-                    and (h_size > self.min_block_size) 
-                    and (w_size > self.min_block_size)
-        
-        若不分裂（或已达最小尺寸），创建 Block 并 append 到 blocks。
-        若分裂，将 H/W 各一分为二，递归处理 4 个子区域。
-        
-        注意：分裂点取 h_mid = h_start + h_size // 2（保证是 2 的幂对齐，
-        前提是初始尺寸是 2 的幂。若不是，向下取最近的偶数。）
-        """
+    def _tile_uniform(self, Ft, Ht, Wt, block_size) -> List[Block]:
+        """按单一 blocksize 对 3D token grid 做均匀切分。"""
+
+    def _block_cv_list(self, curvature_map, blocks) -> List[float]:
+        """计算分块后每个 block 的内部曲率 cv。"""
 ```
 
 实现约束：
 
 * 所有 block 的 f/h/w 范围必须恰好覆盖 [0, Ft) × [0, Ht) × [0, Wt)，无遗漏无重叠
 * block_id 从 0 递增，唯一
-* 在 F 维度上可以简化处理：若 Ft 较小（如 ≤4），F 维度不分裂，整体作为一层
+* 使用一个全局 `selected_block_size=(bf,bh,bw)` 切分全局 3D token grid
+* 不进行分级分区（no grading）
+
+---
+
+### 4.3.1 `partition_visualizer.py`（anchor frame strip）
+
+可视化目标：验证每个 anchor step 的分区是否符合“全局 blocksize + 均匀切分”预期。
+
+输出目录：`results_dir/partition_vis/`
+
+- `step_XXXX_frame_strip.png`：每个 anchor 的 frame strip（叠加 block 边界）
+- `step_XXXX_partition_summary.txt`：文本摘要（无需读图即可检查）
+
+文本摘要建议包含：
+
+- `selected_block_size`
+- `total_blocks`, `total_tokens`
+- `token_count_stats`
+- `curvature_stats`
+- 每个 block 的 `(f/h/w range, size, token_count, curvature)`
+
+文件保留策略：不清理历史文件，保留每个 anchor 的 overview 结果，便于跨 anchor 对比。
 
 ---
 
@@ -438,6 +463,28 @@ class CurvatureMonitor:
         self.prev_t = None
         self.curvature_map = None
 ```
+
+---
+
+### 4.4.1 `straightness.py`（评估链路，WAN Stage-A）
+
+`StraightnessEvaluator` 仅用于评估与验证，不参与加速决策路径。其定位是验证 endpoint drift proxy 与 groundtruth curvature 的关系，而不是驱动 block 调度。
+
+当前实现要点：
+
+- **evaluation-only**：只在 warmup 末尾与 cruise anchor 步触发记录；不回写 scheduler 决策。
+- **groundtruth curvature 近似**：采用 definition (3.1) 的离散近似
+
+    $$\frac{d v}{d t} = \partial_t v + (\nabla_x v)\cdot v$$
+
+    其中 `partial_t v` 用时间双边差分近似，`(nabla_x v)·v` 通过沿速度方向的空间双边差分近似。
+- **支持 `velocity_fn` 回调重算**：当提供 `velocity_fn(x, t)` 时，使用回调在扰动点重算速度场；未提供时退化为两次 anchor 速度差分近似。
+- **可视化输出约定**（`results_dir/straightness_vis/`）：
+    - `straightness_overview.png`
+    - `straightness_heatmap_overview.png`
+    - `groundtruth_curvature_heatmap_overview.png`
+
+时间变量约定：进入 monitor/straightness 公式前，先将 scheduler timestep 归一化到 `[0, 1]`，再用于 $(1-t)$ 与差分项计算。
 
 ---
 
@@ -702,6 +749,11 @@ class CubicScheduler:
 ## 5. 推理流程完整走查
 以 K=50 步、warmup_fraction=0.15、cooldown_fraction=0.15、anchor_interval=8 为例：
 
+> 当前 WAN 解耦实现中，phase2/phase3 主要用于观测与 anchor 采样更新：
+> - phase2（cruise anchor）：执行 full forward + monitor/straightness 更新；
+> - phase3（cruise selective）：当前仍执行 full forward，仅保留阶段标记与观测语义；
+> - 尚未执行 active/frozen token selective forward。
+
 ```
 K_w = 7, K_c = 7, cruise = steps 7..42
 
@@ -711,8 +763,8 @@ Step 6:     WARMUP (最后一步之前), monitor.update() → 存储 prev_endpoi
 Step 7:     CRUISE_ANCHOR (cruise_offset=0), full forward
             monitor.update() → 得到 curvature_map → 分块 → τ 分配
             此后 partition 和 schedule 生效
-Step 8-14:  CRUISE_SELECTIVE, selective forward
-            每步根据 age 和 τ 判断哪些 block active
+Step 8-14:  CRUISE_SELECTIVE, 当前实现仍为 full forward
+                保留 phase 语义用于观测，不执行 active/frozen token selective forward
 Step 15:    CRUISE_ANCHOR (cruise_offset=8), full forward
             重新 monitor → 重新分块 → 重新分配 τ
 Step 16-22: CRUISE_SELECTIVE
@@ -720,42 +772,27 @@ Step 16-22: CRUISE_SELECTIVE
 Step 43-49: COOLDOWN, full forward
 ```
 
-### 5.1 单步CRUISE_SELECTIVE的详细数据流
+时间变量约定（当前 WAN 路径）：每步从 scheduler 取到的 `t`，先归一化到 `[0,1]`，再送入 monitor/straightness 相关公式。
+
+### 5.1 当前 WAN 解耦实现的单步数据流（观测路径）
 
 ```reasonml
 输入: x (B,C,F,H,W), t, dt
 
-1. scheduler._get_phase() → CRUISE_SELECTIVE
+1. `_get_inference_phase()` 判定当前步属于 phase1/2/3/4。
 
-2. scheduler._make_plan():
-   - velocity_cache.get_active_block_ids(partition) 
-     → 例如 blocks [0, 3, 7] 需要更新
-   - 收集这些 block 的 token indices → active_token_indices
-   - 其余为 frozen_token_indices
-   → StepPlan
+2. 执行 CFG 双分支 full forward（cond/uncond），合成 `noise_pred`。
 
-3. wrapper.selective_forward(x, t, step_plan):
-   a. patch_embed(x) + pos_embed → tokens_all (B, N, D)
-   b. tokens_active = tokens_all[:, active_idx]  (B, N_a, D)
-   c. 对每层 l:
-      - adaLN + QKV proj (仅 active) → q, k_new, v_new
-      - apply_rope(q, positions[active_idx])
-      - apply_rope(k_new, positions[active_idx])  
-      - kv_cache.update_layer(l, k_new, v_new, active_idx)
-      - k_full, v_full = kv_cache.get_full_kv(l)
-      - attn = SDPA(q, k_full, v_full) → (B, N_a, H, D)
-      - out_proj → (B, N_a, D)
-      - residual + FFN (仅 active)
-   d. final_layer(tokens_active)
-   e. 组装完整速度:
-      v = velocity_cache.cached_velocity.clone()
-      将 tokens_active unpatchify 后写入 v 的 active 区域
-   f. 返回 v
+3. 若是 warmup 末步或 cruise anchor：
+    - 对当前 scheduler `t` 做 `[0,1]` 归一化；
+    - 调用 `monitor.update(x, v, t_unit)` 更新曲率观测；
+    - 若开启 straightness 评估，调用 `straightness.update(..., velocity_fn=...)` 记录验证指标。
 
-4. scheduler._post_step():
-   - store_full(v), mark_updated(active_bids), tick()
-   
-5. 外部循环: FM sampler => x = x + dt * v
+4. 使用采样器 `sample_scheduler.step(...)` 更新 latent 到下一步。
+
+5. 采样结束后导出可视化：
+    - monitor: `curvature_vis/curvature_overview.png`
+    - straightness: `straightness_vis/*.png`（若开启评估）
 ```
 
 

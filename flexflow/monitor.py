@@ -8,16 +8,12 @@ This module follows flexflow/docs/implement.md section 4.4:
 
 from __future__ import annotations
 
-import os
 from typing import Dict, Optional
 
-import numpy as np
 import torch
 import torch.nn.functional as F
-import matplotlib
 
-matplotlib.use('Agg')
-import matplotlib.pyplot as plt
+from .visualizer import CubicVisualizer
 
 
 class CurvatureMonitor:
@@ -25,6 +21,7 @@ class CurvatureMonitor:
 
     def __init__(self, config):
         self.config = config
+        self.visualizer = CubicVisualizer(config)
         self.prev_endpoint: Optional[torch.Tensor] = None
         self.prev_t: Optional[float] = None
         self.curvature_map: Optional[torch.Tensor] = None
@@ -106,118 +103,15 @@ class CurvatureMonitor:
                               save_raw: bool = False,
                               save_strip: bool = False,
                               save_meta: bool = False):
-        """Export anchor-step curvature maps to results directory.
-
-        Output structure:
-            output_dir/curvature_vis/
-              - curvature_overview.png
-
-        Optional, default-off outputs:
-              - step_XXXX_meta.txt
-              - step_XXXX_map.npz
-              - step_XXXX_mean_hw.png
-              - step_XXXX_time_strip.png
-        """
-        if not self.curvature_history:
-            return
-
-        vis_dir = os.path.join(output_dir, 'curvature_vis')
-        os.makedirs(vis_dir, exist_ok=True)
-        self._clear_directory(vis_dir)
-
-        mean_tiles = []
-        labels = []
-
-        for item in self.curvature_history:
-            step = item['step'] if item['step'] is not None else -1
-            t_val = float(item['t'])
-            curv = item['curvature_map'].float()
-            ft, ht, wt = curv.shape
-
-            stem = f"step_{step:04d}" if step >= 0 else "step_unknown"
-            mean_hw = curv.mean(dim=0)
-            mean_tiles.append(mean_hw.detach().cpu().numpy())
-            labels.append(f"step {step:04d}  t={t_val:.3f}")
-
-            if save_raw:
-                npz_path = os.path.join(vis_dir, f"{stem}_map.npz")
-                np.savez_compressed(npz_path, curvature_map=curv.numpy())
-
-            if save_meta:
-                meta_path = os.path.join(vis_dir, f"{stem}_meta.txt")
-                with open(meta_path, 'w', encoding='utf-8') as f:
-                    f.write(f"step={step}\n")
-                    f.write(f"t={t_val:.8f}\n")
-                    f.write(f"shape=({ft}, {ht}, {wt})\n")
-                    f.write(f"mean={float(curv.mean().item()):.8e}\n")
-                    f.write(f"std={float(curv.std().item()):.8e}\n")
-
-            if save_strip:
-                frame_count = min(max_frames, ft)
-                frame_indices = torch.linspace(0, ft - 1, frame_count).round().long().tolist()
-                tiles = [curv[idx] for idx in frame_indices]
-                strip = torch.cat(tiles, dim=1)
-                self._save_single_heatmap(
-                    strip.detach().cpu().numpy(),
-                    os.path.join(vis_dir, f"{stem}_time_strip.png"),
-                    title=f"{stem} time strip",
-                )
-
-        self._save_heatmap_grid(
-            mean_tiles,
-            labels,
-            os.path.join(vis_dir, 'curvature_overview.png'),
-            suptitle='Anchor Curvature Mean-HW Overview',
-            cmap='turbo',
+        """Backward-compatible entry; visualization is centralized in flexflow.visualizer."""
+        self.visualizer.export_curvature_history(
+            curvature_history=self.curvature_history,
+            output_dir=output_dir,
+            max_frames=max_frames,
+            save_raw=save_raw,
+            save_strip=save_strip,
+            save_meta=save_meta,
         )
-
-    def _save_single_heatmap(self, array_2d: np.ndarray, save_path: str, title: str):
-        fig, ax = plt.subplots(figsize=(8, 4), dpi=150)
-        im = ax.imshow(array_2d, cmap='turbo', aspect='auto')
-        ax.set_title(title)
-        ax.set_xticks([])
-        ax.set_yticks([])
-        fig.colorbar(im, ax=ax, fraction=0.046, pad=0.04)
-        fig.tight_layout()
-        fig.savefig(save_path)
-        plt.close(fig)
-
-    def _save_heatmap_grid(self, maps, labels, save_path: str, suptitle: str, cmap: str):
-        if not maps:
-            raise ValueError('no curvature maps to visualize')
-
-        count = len(maps)
-        cols = min(3, count)
-        rows = (count + cols - 1) // cols
-        fig, axes = plt.subplots(rows, cols, figsize=(5 * cols, 4.2 * rows), dpi=150)
-        axes = np.array(axes).reshape(rows, cols)
-
-        for idx in range(rows * cols):
-            r = idx // cols
-            c = idx % cols
-            ax = axes[r, c]
-            if idx >= count:
-                ax.axis('off')
-                continue
-            # Per-panel normalization for clearer local contrast.
-            im = ax.imshow(maps[idx], cmap=cmap, aspect='auto')
-            ax.set_title(labels[idx], fontsize=10)
-            ax.set_xticks([])
-            ax.set_yticks([])
-
-        fig.suptitle(suptitle, fontsize=14)
-        cbar = fig.colorbar(im, ax=axes.ravel().tolist(), fraction=0.02, pad=0.02)
-        cbar.set_label('curvature')
-        fig.tight_layout(rect=(0.0, 0.0, 0.98, 0.96))
-        fig.savefig(save_path)
-        plt.close(fig)
-
-    def _clear_directory(self, path: str):
-        for entry in os.listdir(path):
-            full_path = os.path.join(path, entry)
-            if os.path.isdir(full_path):
-                continue
-            os.remove(full_path)
 
     def _pool_to_token_space(self, curvature_fhw: torch.Tensor) -> torch.Tensor:
         """Pool latent-space curvature (F,H,W) to token-space (Ft,Ht,Wt)."""

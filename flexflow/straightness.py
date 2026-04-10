@@ -7,17 +7,13 @@ velocity field and compares it against endpoint prediction drift.
 
 from __future__ import annotations
 
-import os
 from dataclasses import dataclass
 from typing import Callable, Optional
 
-import numpy as np
 import torch
 import torch.nn.functional as F
-import matplotlib
 
-matplotlib.use('Agg')
-import matplotlib.pyplot as plt
+from .visualizer import CubicVisualizer
 
 
 @dataclass
@@ -42,6 +38,7 @@ class StraightnessEvaluator:
 
     def __init__(self, config):
         self.config = config
+        self.visualizer = CubicVisualizer(config)
         self.prev_endpoint: Optional[torch.Tensor] = None
         self.prev_velocity: Optional[torch.Tensor] = None
         self.prev_t: Optional[float] = None
@@ -134,142 +131,8 @@ class StraightnessEvaluator:
         self.records = []
 
     def export_visualization(self, output_dir: str):
-        """Export overview PNGs for straightness verification."""
-        if not self.records:
-            return
-
-        vis_dir = os.path.join(output_dir, 'straightness_vis')
-        os.makedirs(vis_dir, exist_ok=True)
-        self._clear_directory(vis_dir)
-
-        self._save_metric_overview(os.path.join(vis_dir, 'straightness_overview.png'))
-        self._save_heatmap_overview(os.path.join(vis_dir, 'straightness_heatmap_overview.png'))
-        self._save_groundtruth_curvature_heatmap_overview(
-            os.path.join(vis_dir, 'groundtruth_curvature_heatmap_overview.png'))
-
-    def _save_metric_overview(self, save_path: str):
-        x_values = self._sample_flat_values('curvature_gt_map')
-        y_values = self._sample_flat_values('proxy_curvature_map')
-        ratios = [record.mean_ratio for record in self.records]
-        corrs = [record.corr for record in self.records]
-
-        fig = plt.figure(figsize=(13, 8), dpi=150)
-        gs = fig.add_gridspec(2, 2, height_ratios=[3.2, 1.4])
-
-        ax_scatter = fig.add_subplot(gs[0, 0])
-        if x_values.size > 0 and y_values.size > 0:
-            max_points = min(3000, x_values.size)
-            indices = np.linspace(0, x_values.size - 1, max_points).astype(int)
-            ax_scatter.scatter(x_values[indices], y_values[indices], s=4, alpha=0.35, c='#4ea3ff')
-            bound = max(float(np.max(x_values)), float(np.max(y_values)), 1e-8) * 1.05
-            ax_scatter.plot([0, bound], [0, bound], linestyle='--', linewidth=1.5, color='#f0ad4e')
-            ax_scatter.set_xlim(0, bound)
-            ax_scatter.set_ylim(0, bound)
-        ax_scatter.set_title('Proxy Curvature vs Groundtruth Curvature (Def. 3.1 approx)')
-        ax_scatter.set_xlabel('groundtruth curvature')
-        ax_scatter.set_ylabel('Proxy curvature')
-        ax_scatter.grid(alpha=0.25)
-
-        ax_ratio = fig.add_subplot(gs[0, 1])
-        if ratios:
-            xs = np.arange(len(ratios))
-            ax_ratio.plot(xs, ratios, marker='o', linewidth=2.0, color='#4ea3ff')
-            ax_ratio.axhline(1.0, linestyle='--', linewidth=1.5, color='#f0ad4e', label='target=1')
-            ax_ratio.set_xlim(-0.2, len(ratios) - 0.8 if len(ratios) > 1 else 0.2)
-        ax_ratio.set_title('Mean Ratio per Anchor')
-        ax_ratio.set_xlabel('Anchor index')
-        ax_ratio.set_ylabel('mean ratio')
-        ax_ratio.grid(alpha=0.25)
-        ax_ratio.legend(loc='best', fontsize=8)
-
-        ax_text = fig.add_subplot(gs[1, :])
-        ax_text.axis('off')
-        summary = [
-            f'samples={len(self.records)}',
-            f'mean corr={np.mean(corrs):.6f}' if corrs else 'mean corr=nan',
-            f'mean ratio={np.mean(ratios):.6f}' if ratios else 'mean ratio=nan',
-            f'std ratio={np.std(ratios):.6f}' if ratios else 'std ratio=nan',
-            f'mean proxy curvature={np.mean([r.mean_proxy_curvature for r in self.records]):.6e}' if self.records else 'mean proxy curvature=nan',
-            f'mean groundtruth curvature={np.mean([r.mean_curvature_gt for r in self.records]):.6e}' if self.records else 'mean groundtruth curvature=nan',
-        ]
-        ax_text.text(0.01, 0.8, ' | '.join(summary), fontsize=10)
-
-        fig.suptitle('Straightness Evaluation Overview', fontsize=15)
-        fig.tight_layout(rect=(0, 0, 1, 0.96))
-        fig.savefig(save_path)
-        plt.close(fig)
-
-    def _save_groundtruth_curvature_heatmap_overview(self, save_path: str):
-        maps = [record.curvature_gt_map.mean(dim=0).detach().cpu().numpy() for record in self.records]
-        labels = [f'step {record.step:04d}  t={record.t:.3f}' for record in self.records]
-        if not maps:
-            return
-
-        count = len(maps)
-        cols = min(3, count)
-        rows = (count + cols - 1) // cols
-        fig, axes = plt.subplots(rows, cols, figsize=(5 * cols, 4.2 * rows), dpi=150)
-        axes = np.array(axes).reshape(rows, cols)
-
-        for idx in range(rows * cols):
-            r = idx // cols
-            c = idx % cols
-            ax = axes[r, c]
-            if idx >= count:
-                ax.axis('off')
-                continue
-            im = ax.imshow(maps[idx], cmap='viridis', aspect='auto')
-            ax.set_title(labels[idx], fontsize=10)
-            ax.set_xticks([])
-            ax.set_yticks([])
-
-        fig.suptitle('Groundtruth Curvature Heatmap Overview (Def. 3.1 approx)', fontsize=14)
-        cbar = fig.colorbar(im, ax=axes.ravel().tolist(), fraction=0.02, pad=0.02)
-        cbar.set_label('groundtruth curvature')
-        fig.tight_layout(rect=(0, 0, 0.98, 0.96))
-        fig.savefig(save_path)
-        plt.close(fig)
-
-    def _save_heatmap_overview(self, save_path: str):
-        maps = [record.straightness_map.mean(dim=0).detach().cpu().numpy() for record in self.records]
-        labels = [f'step {record.step:04d}  t={record.t:.3f}' for record in self.records]
-        if not maps:
-            return
-
-        count = len(maps)
-        cols = min(3, count)
-        rows = (count + cols - 1) // cols
-        fig, axes = plt.subplots(rows, cols, figsize=(5 * cols, 4.2 * rows), dpi=150)
-        axes = np.array(axes).reshape(rows, cols)
-
-        for idx in range(rows * cols):
-            r = idx // cols
-            c = idx % cols
-            ax = axes[r, c]
-            if idx >= count:
-                ax.axis('off')
-                continue
-            # Per-panel normalization for clearer local contrast.
-            im = ax.imshow(maps[idx], cmap='magma', aspect='auto')
-            ax.set_title(labels[idx], fontsize=10)
-            ax.set_xticks([])
-            ax.set_yticks([])
-
-        fig.suptitle('Straightness Heatmap Overview (mean over token-time)', fontsize=14)
-        cbar = fig.colorbar(im, ax=axes.ravel().tolist(), fraction=0.02, pad=0.02)
-        cbar.set_label('straightness')
-        fig.tight_layout(rect=(0, 0, 0.98, 0.96))
-        fig.savefig(save_path)
-        plt.close(fig)
-
-    def _sample_flat_values(self, field_name: str) -> np.ndarray:
-        arrays = []
-        for record in self.records:
-            tensor = getattr(record, field_name)
-            arrays.append(tensor.detach().cpu().reshape(-1).numpy())
-        if not arrays:
-            return np.asarray([], dtype=np.float32)
-        return np.concatenate(arrays, axis=0)
+        """Backward-compatible entry; visualization is centralized in flexflow.visualizer."""
+        self.visualizer.export_straightness_records(self.records, output_dir)
 
     def _compute_groundtruth_curvature(self,
                                        x: torch.Tensor,
@@ -330,14 +193,6 @@ class StraightnessEvaluator:
             stride=(pt, ph, pw),
         )
         return pooled.squeeze(0).squeeze(0)
-
-    @staticmethod
-    def _clear_directory(path: str):
-        for entry in os.listdir(path):
-            full_path = os.path.join(path, entry)
-            if os.path.isdir(full_path):
-                continue
-            os.remove(full_path)
 
     @staticmethod
     def _to_scalar_t(t: float | torch.Tensor) -> float:
