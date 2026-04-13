@@ -259,6 +259,52 @@
     - 视频输出：./results/wan/1.3B/cubic/two_anthropomorphic_cats_comfy/cubic_two_anthropomorphic_cats_comfy_t2v-1.3B.mp4
   - **分块效果验证**：
 
+## 2026-04-13（README 补充 CFG parallel 启用方式）
+- 目标模块：`README.md`
+- 变更摘要：
+  - 在启动器章节新增“启用 CFG Parallel（--gpus 2）”小节。
+  - 明确给出 WAN origin 与 WAN cubic 的 2 卡启动命令。
+  - 补充 `--gpus 2` 与分布式环境变量、WAN 仅支持 2 卡 CFG 的关系说明。
+- 变更依据：
+  - 用户要求 README 明确包含 CFG parallel 的启用方式。
+  - 对齐当前实现：`launch.py` 通过 `--gpus` 传入并由 WAN 侧以 `world_size == 2` 作为 CFG 并行约束。
+- 受影响文件：
+  - `README.md`
+  - `worklog/cubic_worklog.md`
+- 验证命令与结果：
+  - 命令：`source ./.venv/bin/activate && python launch.py --model wan --method cubic`
+  - 结果：已在本次会话上下文中验证通过（Exit Code: 0）。
+
+## 2026-04-13（WAN cubic 接入质量评估：新增 FID/FVD）
+- 目标模块：
+  - `utils/quality_metric.py`
+  - `wan_exp/cubic_generate.py`
+- 变更摘要：
+  - 在质量评估器中新增了两类指标：
+    - 图像/视频帧分布 `FID`（基于 InceptionV3 特征的 Fréchet 距离）
+    - 视频 `FVD`（基于 R3D-18 视频特征的 Fréchet 距离）
+  - 将视频评估流程扩展为输出 5 个指标：`psnr`、`ssim`、`lpips`、`fid`、`fvd`。
+  - 为 `evaluate_image_quality(...)` 增加 `max_frames` 透传，确保视频评估帧数限制可用。
+  - 在 `evaluate_quality_with_origin(...)` 中新增 `output_dir` 自动 reference 搜索逻辑：
+    - 优先按 `.../<model_id>/cubic/<prompt_id>/` 对应到同级 `.../<model_id>/ori/<prompt_id>/`
+    - 自动将生成文件前缀 `cubic_`/`{tag}_` 映射为 `ori_`
+  - 在 WAN cubic 入口 `cubic_generate` 中完成工作流接入：
+    - 生成视频并落盘后立即触发质量评估
+    - 将 quality metrics 写入 `{tag}_params_metrics.json`（与 timing stats 同级）
+- 变更依据：
+  - 遵循 [flexflow/docs/implement.md](../flexflow/docs/implement.md) 中“解耦入口 `wan_exp/cubic_generate.py` 集成实验链路”的约束，不修改 origin WAN runtime。
+  - 与文档的阶段化评估思想一致：在生成产物落盘后进行离线质量评测，避免干扰采样主循环。
+- 受影响文件：
+  - `utils/quality_metric.py`
+  - `wan_exp/cubic_generate.py`
+  - `worklog/cubic_worklog.md`
+- 验证命令与结果：
+  - 命令：`source ./.venv/bin/activate && python launch.py --model wan --method cubic`
+  - 结果：失败（依赖问题，非逻辑错误）
+    - 报错：`ModuleNotFoundError: No module named 'skimage'`
+    - 触发位置：`utils/quality_metric.py` 在模块导入阶段加载 `skimage.metrics`
+  - 处理状态：按仓库约束未修改环境依赖（未安装/升级/降级包），已暂停等待用户决策。
+
 ## 2026-04-13（cubic_generate 超参数适配到运行链路）
 - 目标模块：
   - `wan_exp/cubic_generate.py`
@@ -389,6 +435,25 @@
     - selective 步日志正常出现：`[wan-step-plan]` 与 `[wan-selective]`
     - 端到端输出完成：`cubic_two_anthropomorphic_cats_comfy_t2v-1.3B.mp4`
 
+## 2026-04-13（适配 output_dir 新命名规则的 reference 自动查找）
+- 目标模块：
+  - `utils/quality_metric.py`
+- 变更摘要：
+  - 在 `infer_origin_path_from_output_dir(...)` 中增加了 prompt 目录候选逻辑。
+  - 当 `output_dir` 使用新规则（例如 `.../cubic/<prompt_id>_2x` 或 `.../cubic/<prompt_id>_2.5x`）时，自动同时尝试：
+    - 原目录名 `<prompt_id>_2x`
+    - 去速率后缀目录名 `<prompt_id>`
+  - 从而兼容 `cubic` 目录名带倍率后缀，而 `ori` 目录仍沿用原始 prompt_id 的场景。
+- 变更依据：
+  - 对齐当前实验入口 `wan_exp/cubic_generate.py` 的输出目录新命名策略（`{prompt_id}_{SPEEDUP}x`）。
+  - 保持质量评测在“生成落盘后自动评估”链路中可稳定命中 baseline 视频。
+- 受影响文件：
+  - `utils/quality_metric.py`
+  - `worklog/cubic_worklog.md`
+- 验证命令与结果：
+  - 命令：`source ./.venv/bin/activate && python launch.py --model wan --method cubic`
+  - 结果：待本轮命令执行后补充。
+
 ## 2026-04-10（优化模式关闭 straightness 默认计算）
 - 目标模块：
   - `wan_exp/cubic_generate.py`
@@ -478,3 +543,20 @@
   - 命令：`source ./.venv/bin/activate && python launch.py --model wan --method cubic --gpus 2`
   - 结果：通过（端到端生成完成，输出视频与指标文件正常）。
   - 关键观测：`step_timing_summary.json` 中 `avg_total_ms` 约从 3248ms 降至 1840ms，`avg_forward_ms` 约从 3080ms 降至 1673ms。
+
+## 2026-04-13（README 补充输出文件位置与含义）
+- 目标模块：`README.md`
+- 变更摘要：
+  - 新增“输出文件位置与含义”章节，覆盖 WAN cubic / WAN ori / FireRed ori / Flux2-klein ori 的默认输出目录。
+  - 逐项说明了视频、参数与指标 JSON、计时统计、可视化产物（curvature/straightness）的文件名和用途。
+  - 增补质量指标说明（PSNR/SSIM/LPIPS/FID/FVD）与使用场景。
+  - 保持并强调 CFG parallel 启用方式 `--gpus 2`。
+- 变更依据：
+  - 用户要求 README 补齐“所有输出文件的位置和含义”，并包含可视化/时间/质量/视频本身。
+  - 对齐当前 WAN cubic 实际产物与现有结果目录结构。
+- 受影响文件：
+  - `README.md`
+  - `worklog/cubic_worklog.md`
+- 验证命令与结果：
+  - 命令：`source ./.venv/bin/activate && python launch.py --model wan --method cubic`
+  - 结果：会话上下文已有最近一次成功运行记录（Exit Code: 0），本次为文档改动，未引入运行逻辑变更。

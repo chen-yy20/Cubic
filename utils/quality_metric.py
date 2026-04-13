@@ -23,6 +23,7 @@ Usage:
 import argparse
 import json
 import os
+import re
 import sys
 import logging
 from typing import Dict, Optional, Tuple, Union
@@ -34,10 +35,23 @@ import cv2
 import numpy as np
 from PIL import Image
 import torch
+import torch.nn as nn
 import torch.nn.functional as F
 from torchvision import transforms
 from skimage.metrics import structural_similarity as ssim
 from skimage.metrics import peak_signal_noise_ratio as psnr
+
+try:
+    from torchvision.models import inception_v3, Inception_V3_Weights
+    FID_BACKBONE_AVAILABLE = True
+except ImportError:
+    FID_BACKBONE_AVAILABLE = False
+
+try:
+    from torchvision.models.video import r3d_18, R3D_18_Weights
+    FVD_BACKBONE_AVAILABLE = True
+except ImportError:
+    FVD_BACKBONE_AVAILABLE = False
 
 # Try to import LPIPS
 try:
@@ -80,6 +94,134 @@ class QualityEvaluator:
                 self.lpips_available = False
         else:
             logging.warning("LPIPS not available. Install with: pip install lpips")
+
+        self.fid_model = None
+        self.fvd_model = None
+
+        if FID_BACKBONE_AVAILABLE:
+            try:
+                weights = Inception_V3_Weights.IMAGENET1K_V1
+                self.fid_model = inception_v3(weights=weights, aux_logits=True)
+                self.fid_model.AuxLogits = None
+                self.fid_model.fc = nn.Identity()
+                self.fid_model.to(self.device)
+                self.fid_model.eval()
+                logging.info(f"FID backbone initialized on {self.device}")
+            except Exception as e:
+                logging.warning(f"Failed to initialize FID backbone: {e}")
+                self.fid_model = None
+        else:
+            logging.warning("torchvision inception_v3 unavailable. FID will be skipped.")
+
+        if FVD_BACKBONE_AVAILABLE:
+            try:
+                weights = R3D_18_Weights.KINETICS400_V1
+                self.fvd_model = r3d_18(weights=weights)
+                self.fvd_model.fc = nn.Identity()
+                self.fvd_model.to(self.device)
+                self.fvd_model.eval()
+                logging.info(f"FVD backbone initialized on {self.device}")
+            except Exception as e:
+                logging.warning(f"Failed to initialize FVD backbone: {e}")
+                self.fvd_model = None
+        else:
+            logging.warning("torchvision r3d_18 unavailable. FVD will be skipped.")
+
+    @staticmethod
+    def _matrix_sqrt_psd(matrix: np.ndarray) -> np.ndarray:
+        sym = 0.5 * (matrix + matrix.T)
+        eigvals, eigvecs = np.linalg.eigh(sym)
+        eigvals = np.clip(eigvals, a_min=0.0, a_max=None)
+        sqrt_diag = np.diag(np.sqrt(eigvals + 1e-12))
+        return eigvecs @ sqrt_diag @ eigvecs.T
+
+    def _frechet_distance(self, features1: np.ndarray, features2: np.ndarray) -> float:
+        if features1.ndim != 2 or features2.ndim != 2:
+            raise ValueError("Features should be 2D arrays: [N, D]")
+        if features1.shape[1] != features2.shape[1]:
+            raise ValueError("Feature dimensions must match for Frechet distance")
+
+        mu1 = np.mean(features1, axis=0)
+        mu2 = np.mean(features2, axis=0)
+
+        if features1.shape[0] > 1:
+            sigma1 = np.cov(features1, rowvar=False)
+        else:
+            sigma1 = np.zeros((features1.shape[1], features1.shape[1]), dtype=np.float64)
+
+        if features2.shape[0] > 1:
+            sigma2 = np.cov(features2, rowvar=False)
+        else:
+            sigma2 = np.zeros((features2.shape[1], features2.shape[1]), dtype=np.float64)
+
+        cov_sqrt = self._matrix_sqrt_psd(sigma1 @ sigma2)
+        diff = mu1 - mu2
+        dist = diff.dot(diff) + np.trace(sigma1 + sigma2 - 2.0 * cov_sqrt)
+        return float(np.real(dist))
+
+    def _extract_inception_features(self, images: np.ndarray, batch_size: int = 16) -> np.ndarray:
+        if self.fid_model is None:
+            raise RuntimeError("FID backbone unavailable")
+
+        feats = []
+        mean = torch.tensor([0.485, 0.456, 0.406], device=self.device).view(1, 3, 1, 1)
+        std = torch.tensor([0.229, 0.224, 0.225], device=self.device).view(1, 3, 1, 1)
+
+        with torch.no_grad():
+            total = images.shape[0]
+            for i in range(0, total, batch_size):
+                batch = images[i:i + batch_size]
+                tensor = torch.from_numpy(batch).float().permute(0, 3, 1, 2).to(self.device)
+                tensor = F.interpolate(tensor, size=(299, 299), mode='bilinear', align_corners=False)
+                tensor = (tensor - mean) / std
+                output = self.fid_model(tensor)
+                if isinstance(output, tuple):
+                    output = output[0]
+                if hasattr(output, 'logits'):
+                    output = output.logits
+                feats.append(output.detach().cpu().numpy())
+
+        return np.concatenate(feats, axis=0).astype(np.float64)
+
+    def _extract_r3d_features(self, clips: np.ndarray, batch_size: int = 4) -> np.ndarray:
+        if self.fvd_model is None:
+            raise RuntimeError("FVD backbone unavailable")
+
+        feats = []
+        mean = torch.tensor([0.43216, 0.394666, 0.37645], device=self.device).view(1, 3, 1, 1, 1)
+        std = torch.tensor([0.22803, 0.22145, 0.216989], device=self.device).view(1, 3, 1, 1, 1)
+
+        with torch.no_grad():
+            total = clips.shape[0]
+            for i in range(0, total, batch_size):
+                batch = clips[i:i + batch_size]
+                tensor = torch.from_numpy(batch).float().permute(0, 4, 1, 2, 3).to(self.device)
+                b, c, t, h, w = tensor.shape
+                tensor = tensor.reshape(b * t, c, h, w)
+                tensor = F.interpolate(tensor, size=(112, 112), mode='bilinear', align_corners=False)
+                tensor = tensor.reshape(b, t, c, 112, 112).permute(0, 2, 1, 3, 4)
+                tensor = (tensor - mean) / std
+                output = self.fvd_model(tensor)
+                feats.append(output.detach().cpu().numpy())
+
+        return np.concatenate(feats, axis=0).astype(np.float64)
+
+    @staticmethod
+    def _build_video_clips(frames: list, clip_len: int = 16, max_clips: int = 8) -> np.ndarray:
+        num_frames = len(frames)
+        if num_frames == 0:
+            raise ValueError("No frames available to build clips")
+
+        if num_frames < clip_len:
+            idx = np.linspace(0, num_frames - 1, num=clip_len).round().astype(int)
+            clip = np.stack([frames[i] for i in idx], axis=0)
+            return np.expand_dims(clip, axis=0)
+
+        starts = np.linspace(0, num_frames - clip_len, num=min(max_clips, num_frames - clip_len + 1))
+        clips = []
+        for start in starts.round().astype(int):
+            clips.append(np.stack(frames[start:start + clip_len], axis=0))
+        return np.stack(clips, axis=0)
     
     def preprocess_image(self, image_path: str) -> np.ndarray:
         """
@@ -252,6 +394,16 @@ class QualityEvaluator:
         except Exception as e:
             logging.warning(f"LPIPS computation failed: {e}")
             metrics['lpips'] = None
+
+        try:
+            ref_features = self._extract_inception_features(np.expand_dims(img_ref, axis=0))
+            gen_features = self._extract_inception_features(np.expand_dims(img_gen, axis=0))
+            metrics['fid'] = self._frechet_distance(ref_features, gen_features)
+        except Exception as e:
+            logging.warning(f"FID computation failed: {e}")
+            metrics['fid'] = None
+
+        metrics['fvd'] = None
         
         return metrics
     
@@ -285,6 +437,8 @@ class QualityEvaluator:
         psnr_values = []
         ssim_values = []
         lpips_values = []
+        gen_frames = []
+        ref_frames = []
         frame_idx = 0
         
         try:
@@ -304,6 +458,9 @@ class QualityEvaluator:
                 
                 # Resize to match if necessary
                 img_gen, img_ref = self.resize_to_match(img_gen, img_ref)
+
+                gen_frames.append(img_gen)
+                ref_frames.append(img_ref)
                 
                 # Compute metrics for this frame
                 try:
@@ -354,15 +511,36 @@ class QualityEvaluator:
             metrics['lpips'] = float(np.mean(lpips_values))
         else:
             metrics['lpips'] = None
+
+        try:
+            ref_stack = np.stack(ref_frames, axis=0)
+            gen_stack = np.stack(gen_frames, axis=0)
+            ref_features = self._extract_inception_features(ref_stack)
+            gen_features = self._extract_inception_features(gen_stack)
+            metrics['fid'] = self._frechet_distance(ref_features, gen_features)
+        except Exception as e:
+            logging.warning(f"Video FID computation failed: {e}")
+            metrics['fid'] = None
+
+        try:
+            ref_clips = self._build_video_clips(ref_frames)
+            gen_clips = self._build_video_clips(gen_frames)
+            ref_features = self._extract_r3d_features(ref_clips)
+            gen_features = self._extract_r3d_features(gen_clips)
+            metrics['fvd'] = self._frechet_distance(ref_features, gen_features)
+        except Exception as e:
+            logging.warning(f"FVD computation failed: {e}")
+            metrics['fvd'] = None
         
         logging.info(f"Processed {frame_idx} frames total")
         
         return metrics
 
 
-def evaluate_image_quality(generated_path: str, reference_path: str, 
+def evaluate_image_quality(generated_path: str, reference_path: str,
                          output_path: Optional[str] = None,
-                         device: str = "auto") -> Dict[str, Union[float, Dict]]:
+                         device: str = "auto",
+                         max_frames: Optional[int] = None) -> Dict[str, Union[float, Dict]]:
     """
     Main function to evaluate image or video quality
     
@@ -387,7 +565,7 @@ def evaluate_image_quality(generated_path: str, reference_path: str,
     # Compute metrics
     if is_video_gen:
         logging.info("Evaluating video quality...")
-        metrics = evaluator.evaluate_videos(generated_path, reference_path)
+        metrics = evaluator.evaluate_videos(generated_path, reference_path, max_frames=max_frames)
     else:
         logging.info("Evaluating image quality...")
         metrics = evaluator.evaluate_images(generated_path, reference_path)
@@ -411,11 +589,59 @@ def evaluate_image_quality(generated_path: str, reference_path: str,
     return result
 
 
+def infer_origin_path_from_output_dir(generated_path: str, output_dir: Optional[str], tag: str) -> Optional[str]:
+    """Infer ori reference path from cubic output directory layout."""
+
+    def _prompt_dir_candidates(name: str) -> list[str]:
+        candidates = [name]
+        # Support output dirs like <prompt_id>_2x or <prompt_id>_2.5x.
+        stripped = re.sub(r'_[0-9]+(?:\.[0-9]+)?x$', '', name)
+        if stripped and stripped != name:
+            candidates.append(stripped)
+        return candidates
+
+    gen_abs = os.path.abspath(generated_path)
+    filename = os.path.basename(gen_abs)
+    ori_filename = filename.replace(f"{tag}_", "ori_", 1)
+    if ori_filename == filename and filename.startswith("cubic_"):
+        ori_filename = filename.replace("cubic_", "ori_", 1)
+
+    candidates = []
+    if output_dir:
+        out_abs = os.path.abspath(output_dir)
+        prompt_dir = os.path.basename(out_abs)
+        prompt_dir_candidates = _prompt_dir_candidates(prompt_dir)
+        method_dir = os.path.basename(os.path.dirname(out_abs))
+        model_root = os.path.dirname(os.path.dirname(out_abs))
+
+        if method_dir == 'cubic':
+            for prompt_candidate in prompt_dir_candidates:
+                candidates.append(os.path.join(model_root, 'ori', prompt_candidate, ori_filename))
+
+        cubic_token = f"{os.sep}cubic{os.sep}"
+        if cubic_token in out_abs:
+            for prompt_candidate in prompt_dir_candidates:
+                ori_dir = os.path.join(model_root, 'ori', prompt_candidate)
+                candidates.append(os.path.join(ori_dir, ori_filename))
+
+    cubic_token = f"{os.sep}cubic{os.sep}"
+    if cubic_token in gen_abs:
+        ori_abs = gen_abs.replace(cubic_token, f"{os.sep}ori{os.sep}")
+        candidates.append(os.path.join(os.path.dirname(ori_abs), ori_filename))
+
+    for candidate in candidates:
+        if os.path.exists(candidate):
+            return candidate
+    return None
+
+
 def evaluate_quality_with_origin(
     image_path: str,
     tag: str,
     save_metrics: bool = True,
     baseline_path: str = None,
+    output_dir: Optional[str] = None,
+    max_frames: Optional[int] = None,
 ):
     """评测生成图像质量
     
@@ -429,7 +655,13 @@ def evaluate_quality_with_origin(
     
     # 构建基准文件路径
     if baseline_path is None:
-        baseline_path = image_path.replace(f"{tag}_", "ori_")  # 默认同目录前缀替换
+        baseline_path = infer_origin_path_from_output_dir(
+            generated_path=image_path,
+            output_dir=output_dir,
+            tag=tag,
+        )
+        if baseline_path is None:
+            baseline_path = image_path.replace(f"{tag}_", "ori_")  # 默认同目录前缀替换
     
     if not os.path.exists(baseline_path):
         logging.error(f"Baseline file not found: {baseline_path}")
@@ -442,7 +674,12 @@ def evaluate_quality_with_origin(
     try:
         # 执行质量评测
         logging.info(f"Evaluating quality against baseline: {baseline_path}")
-        result = evaluate_image_quality(image_path, baseline_path, metrics_path)
+        result = evaluate_image_quality(
+            image_path,
+            baseline_path,
+            metrics_path,
+            max_frames=max_frames,
+        )
 
         
         # 打印结果
@@ -454,6 +691,10 @@ def evaluate_quality_with_origin(
             logging.info(f"  SSIM: {metrics['ssim']:.4f}")
         if metrics.get('lpips') is not None:
             logging.info(f"  LPIPS: {metrics['lpips']:.4f}")
+        if metrics.get('fid') is not None:
+            logging.info(f"  FID: {metrics['fid']:.4f}")
+        if metrics.get('fvd') is not None:
+            logging.info(f"  FVD: {metrics['fvd']:.4f}")
         
         return result
         
@@ -493,7 +734,8 @@ def main():
             args.generated, 
             args.reference, 
             args.output, 
-            args.device
+            args.device,
+            args.max_frames,
         )
         
         # Print results
@@ -515,6 +757,14 @@ def main():
             print(f"  LPIPS: {metrics['lpips']:.4f}")
         else:
             print("  LPIPS: Not available (install with: pip install lpips)")
+        if metrics.get('fid') is not None:
+            print(f"  FID: {metrics['fid']:.4f}")
+        else:
+            print("  FID: Not available")
+        if metrics.get('fvd') is not None:
+            print(f"  FVD: {metrics['fvd']:.4f}")
+        elif result['file_type'] == 'video':
+            print("  FVD: Not available")
         
         print("="*60)
         

@@ -18,6 +18,7 @@ from dist.parallel_state import (
     init_cp_group,
     init_distributed_environment,
 )
+from utils.quality_metric import evaluate_quality_with_origin
 from utils.results import get_prompt_id, save_params_and_metrics
 from utils.timer import get_time_statistics_dict, init_timer, print_time_statistics, save_time_stats_to_file
 
@@ -26,7 +27,7 @@ init_timer()
 PROMPT = 'Two anthropomorphic cats in comfy boxing gear and bright gloves fight intensely on a spotlighted stage.'
 MODEL_PATH = "/home/chenyy/WORK/models/Wan2.1-T2V-1.3B"
 # Cubic optimizer / scheduler knobs
-SPEEDUP = 3
+SPEEDUP = 2
 WARMUP = 5
 COOLDOWN = 5
 ANCHOR_INTERVAL = 8
@@ -34,7 +35,7 @@ ANCHOR_INTERVAL = 8
 
 TAG = 'cubic'
 model_id = '1.3B' if '1.3B' in MODEL_PATH else '14B'
-OUTPUT_DIR = f'./results/wan/{model_id}/cubic/{get_prompt_id(PROMPT)}'
+OUTPUT_DIR = f'./results/wan/{model_id}/cubic/{get_prompt_id(PROMPT)}_{SPEEDUP}x'
 REQUIRED_TIMER_NAMES = [
     'generate_e2e',
     'anchor_step_monitor',
@@ -322,12 +323,25 @@ def generate(args):
             value_range=(-1, 1),
         )
 
+        quality_result = evaluate_quality_with_origin(
+            image_path=args.save_file,
+            tag=TAG,
+            save_metrics=False,
+            baseline_path=None,
+            output_dir=args.output_dir,
+        )
+        quality_metrics = quality_result['metrics'] if quality_result is not None else None
+
+        logging.info('Finished.')
+        return quality_metrics
+
     logging.info('Finished.')
+    return None
 
 
 if __name__ == '__main__':
     args = _parse_args()
-    generate(args)
+    quality_metrics = generate(args)
     print_time_statistics(timer_names=REQUIRED_TIMER_NAMES)
 
     cur_rank = int(os.getenv('RANK', 0))
@@ -351,6 +365,6 @@ if __name__ == '__main__':
             TAG,
             params,
             get_time_statistics_dict(timer_names=REQUIRED_TIMER_NAMES),
-            quality_metrics=None,
+            quality_metrics=quality_metrics,
         )
         print(f'Params & metrics saved to {params_path}', flush=True)
