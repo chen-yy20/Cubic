@@ -1,6 +1,6 @@
 import time
 import torch
-from typing import Dict, Optional
+from typing import Dict, Optional, Iterable, List
 from contextlib import ContextDecorator
 import numpy as np
 
@@ -90,7 +90,13 @@ class TimerManager:
         return _TimerContext()
 
     @classmethod
-    def print_time_statistics(cls, detect_outliers=False, threshold=1.5):
+    def _resolve_timer_names(cls, timer_names: Optional[Iterable[str]] = None) -> List[str]:
+        if timer_names is None:
+            return list(cls._timers.keys())
+        return [str(name) for name in timer_names]
+
+    @classmethod
+    def print_time_statistics(cls, detect_outliers=False, threshold=1.5, timer_names: Optional[Iterable[str]] = None):
         """
         Print timing statistics (min/max/avg) for all timers
         Args:
@@ -149,19 +155,21 @@ class TimerManager:
             print("-" * 66)
             data_format = "{:<20} | {:>10.4f} | {:>10.4f} | {:>10.4f} | {:>8d}"
 
-        for name, timer in cls._timers.items():
-            if timer.times:
+        for name in cls._resolve_timer_names(timer_names):
+            timer = cls._timers.get(name)
+            times = timer.times if timer is not None else []
+            if times:
                 if detect_outliers:
-                    outliers, normal_times = detect_outliers_iqr(timer.times, threshold)
+                    outliers, normal_times = detect_outliers_iqr(times, threshold)
                     
                     if normal_times:  # 有正常值
                         avg = sum(normal_times) / len(normal_times)
                         min_time = min(normal_times)
                         max_time = max(normal_times)
                     else:  # 全是离群值
-                        avg = sum(timer.times) / len(timer.times)
-                        min_time = min(timer.times)
-                        max_time = max(timer.times)
+                        avg = sum(times) / len(times)
+                        min_time = min(times)
+                        max_time = max(times)
                         
                     outliers_avg = sum(outliers) / len(outliers) if outliers else 0
                     
@@ -170,43 +178,58 @@ class TimerManager:
                         min_time,
                         max_time,
                         avg,
-                        len(timer.times),
+                        len(times),
                         len(outliers),
                         outliers_avg
                     ))
                 else:
                     # 不检测离群值的简单统计
-                    avg = sum(timer.times) / len(timer.times)
-                    min_time = min(timer.times)
-                    max_time = max(timer.times)
+                    avg = sum(times) / len(times)
+                    min_time = min(times)
+                    max_time = max(times)
                     
                     print(data_format.format(
                         name[:20], 
                         min_time,
                         max_time,
                         avg,
-                        len(timer.times)
+                        len(times)
                     ))
+            elif timer_names is not None:
+                # 显式指定的timer即使暂无样本也打印，占位为0
+                if detect_outliers:
+                    print(data_format.format(name[:20], 0.0, 0.0, 0.0, 0, 0, 0.0))
+                else:
+                    print(data_format.format(name[:20], 0.0, 0.0, 0.0, 0))
 
         # 打印对应长度的分隔线
         print(("=" * 94 if detect_outliers else "=" * 66) + "\n")
         
     @classmethod
-    def get_stats_dict(cls):
+    def get_stats_dict(cls, timer_names: Optional[Iterable[str]] = None):
         """Return timing statistics as a dictionary"""
         result = {}
-        for name, timer in cls._timers.items():
-            if timer.times:
+        for name in cls._resolve_timer_names(timer_names):
+            timer = cls._timers.get(name)
+            times = timer.times if timer is not None else []
+            if times:
                 result[name] = {
-                    "min_ms": round(min(timer.times), 4),
-                    "max_ms": round(max(timer.times), 4),
-                    "avg_ms": round(sum(timer.times) / len(timer.times), 4),
-                    "samples": len(timer.times),
+                    "min_ms": round(min(times), 4),
+                    "max_ms": round(max(times), 4),
+                    "avg_ms": round(sum(times) / len(times), 4),
+                    "samples": len(times),
+                }
+            elif timer_names is not None:
+                result[name] = {
+                    "min_ms": 0.0,
+                    "max_ms": 0.0,
+                    "avg_ms": 0.0,
+                    "samples": 0,
                 }
         return result
 
     @classmethod
-    def save_time_statistics_to_file(cls, filepath="timing_stats.txt"):
+    def save_time_statistics_to_file(cls, filepath="timing_stats.txt", timer_names: Optional[Iterable[str]] = None):
         """Save timing statistics (min/max/avg) to a text file and tracker"""
         if not cls._global_enabled:
             return
@@ -224,18 +247,22 @@ class TimerManager:
             f.write("-" * 66 + "\n")
             
             data_format = "{:<20} | {:>10.4f} | {:>10.4f} | {:>10.4f} | {:>8d}\n"
-            for name, timer in cls._timers.items():
-                if timer.times:
-                    avg = sum(timer.times) / len(timer.times)
-                    min_time = min(timer.times)
-                    max_time = max(timer.times)
+            for name in cls._resolve_timer_names(timer_names):
+                timer = cls._timers.get(name)
+                times = timer.times if timer is not None else []
+                if times:
+                    avg = sum(times) / len(times)
+                    min_time = min(times)
+                    max_time = max(times)
                     f.write(data_format.format(
                         name[:20], 
                         min_time,
                         max_time,
                         avg,
-                        len(timer.times)
+                        len(times)
                     ))
+                elif timer_names is not None:
+                    f.write(data_format.format(name[:20], 0.0, 0.0, 0.0, 0))
             f.write("=" * 66 + "\n")
 
         # 尝试记录到tracker
@@ -297,11 +324,15 @@ def init_timer(enable: bool = True):
 def get_timer(name: str) -> ContextDecorator:
     return TimerManager.get_timer(name)
 
-def print_time_statistics():
-    TimerManager.print_time_statistics()
+def print_time_statistics(detect_outliers=False, threshold=1.5, timer_names: Optional[Iterable[str]] = None):
+    TimerManager.print_time_statistics(detect_outliers, threshold, timer_names)
     
-def save_time_statistics_to_file(file_path="timing_stats.txt"):
-    TimerManager.save_time_statistics_to_file(file_path)
+def save_time_statistics_to_file(file_path="timing_stats.txt", timer_names: Optional[Iterable[str]] = None):
+    TimerManager.save_time_statistics_to_file(file_path, timer_names)
+
+def save_time_stats_to_file(file_path="timing_stats.txt", timer_names: Optional[Iterable[str]] = None):
+    """Alias kept for concise call sites."""
+    TimerManager.save_time_statistics_to_file(file_path, timer_names)
     
 def enable_timing():
     """Globally enable timing measurement"""
@@ -315,6 +346,6 @@ def is_timing_enabled() -> bool:
     """Check global timing enable status"""
     return TimerManager.is_timing_enabled()
 
-def get_time_statistics_dict() -> dict:
+def get_time_statistics_dict(timer_names: Optional[Iterable[str]] = None) -> dict:
     """Return timing statistics as a dictionary"""
-    return TimerManager.get_stats_dict()
+    return TimerManager.get_stats_dict(timer_names)

@@ -259,6 +259,29 @@
     - 视频输出：./results/wan/1.3B/cubic/two_anthropomorphic_cats_comfy/cubic_two_anthropomorphic_cats_comfy_t2v-1.3B.mp4
   - **分块效果验证**：
 
+## 2026-04-13（cubic_generate 超参数适配到运行链路）
+- 目标模块：
+  - `wan_exp/cubic_generate.py`
+  - `wan_exp/cubic_text2video.py`
+- 变更摘要：
+  - 将 `cubic_generate.py` 顶部实验超参数接入 Cubic 运行配置：
+    - `SPEEDUP -> cfg.target_speedup`
+    - `WARMUP -> cfg.warmup_fraction`（按 `WARMUP / sample_steps` 转换）
+    - `COOLDOWN -> cfg.cooldown_fraction`（按 `COOLDOWN / sample_steps` 转换）
+    - `ANCHOR_INTERVAL -> cfg.anchor_interval`
+  - 在 `cubic_generate.py` 增加覆盖后配置日志，便于确认本次实验使用的 optimizer/scheduler 参数。
+  - 在 `CubicWanT2V` 中移除 phase 硬编码常量，改为优先读取 `config` 中的 `warmup_fraction/cooldown_fraction/anchor_interval`，确保入口参数真正影响 phase 判定与 anchor 调度。
+- 变更依据：
+  - 对齐 `flexflow/docs/implement.md` 2.1/2.2 中 phase 与 anchor 的配置化要求。
+  - 对齐 `flexflow/docs/implement.md` 2.5 中 optimizer 目标速度参数（`target_speedup`）应可由实验入口控制。
+- 受影响文件：
+  - `wan_exp/cubic_generate.py`
+  - `wan_exp/cubic_text2video.py`
+  - `worklog/cubic_worklog.md`
+- 验证命令与结果：
+  - 命令：`source ./.venv/bin/activate && python launch.py --model wan --method cubic`
+  - 结果：通过（端到端生成完成，日志显示配置覆盖生效：`target_speedup=2.0 warmup_fraction=0.1 cooldown_fraction=0.1 anchor_interval=8`；结果文件与 `step_timing_summary.json` 正常输出）。
+
 ## 2026-04-10（selective phase 频率优化器 + 可视化统一）
 - 目标模块：
   - `flexflow/optimizer.py`
@@ -293,9 +316,98 @@
     - 新增 optimizer 日志示例：`[wan-optimizer] step=15 tau(min=1 max=4 mean=2.265) mean_update_rate=0.497475 achieved_speedup=2.010`
     - frame strip 继续输出到 `partition_vis/step_XXXX_frame_strip.png`，并包含 `tau` 叠加显示
     - 视频输出：`results/wan/1.3B/cubic/two_anthropomorphic_cats_comfy/cubic_two_anthropomorphic_cats_comfy_t2v-1.3B.mp4`
+
+## 2026-04-10（删除旧 partition_visualizer 入口，统一 visualizer）
+- 目标模块：
+  - `flexflow/partition_visualizer.py`（删除）
+  - `flexflow/visualizer.py`
+  - `flexflow/__init__.py`
+- 变更摘要：
+  - 删除旧的 `partition_visualizer.py` 兼容入口，避免可视化逻辑双入口并存。
+  - 保持 `PartitionVisualizer`、`CubicVisualizer`、`GradedPartitionVisualizer` 统一由 `flexflow/visualizer.py` 导出。
+  - 确保包内 `__init__.py` 仅从 `visualizer.py` 进入可视化实现。
+- 变更依据：
+  - 按用户要求收敛可视化入口，避免后续 selective phase/调度器接线时出现旧路径混用。
+  - 维持实现集中在一个文件，便于后续继续扩展 step plan / mask 可视化。
+- 受影响文件：
+  - `flexflow/partition_visualizer.py`（删除）
+  - `flexflow/visualizer.py`
+  - `flexflow/__init__.py`
+  - `worklog/cubic_worklog.md`
+- 验证命令与结果：
+  - 命令：`python3 -m py_compile flexflow/__init__.py flexflow/visualizer.py flexflow/optimizer.py flexflow/scheduler.py flexflow/monitor.py flexflow/straightness.py wan_exp/cubic_text2video.py`
+  - 结果：通过（无语法错误输出）
+
+## 2026-04-10（WAN selective sparse forward 接入 StepPlan）
+- 目标模块：
+  - `wan_exp/cubic_selective_forward.py`（新建）
+  - `wan_exp/cubic_text2video.py`
+- 变更摘要：
+  - 新增 WAN 专用 `WanSelectiveForwardEngine`，将 `StepPlan` 真正用于 selective sparse forward。
+  - 在 selective 步中实现 active/frozen token 分流：
+    - active token 走完整 block 计算（self-attn + cross-attn + ffn）；
+    - self-attn 内部使用 active Q + (active 更新后 + frozen 缓存) 的 K/V。
+  - 实现了按 token 索引的 RoPE（indexed RoPE），用于 masked token 场景，避免沿用全序列连续 RoPE 假设。
+  - KV cache 采用字典维护，key 采用 `(cfg_branch, layer_idx)`，分别维护 `k_cache` / `v_cache`；输出 cache 按 branch 维护。
+  - selective 末端仅得到 active 输出后，用输出 cache 补全 frozen tokens，再执行 unpatchify。
+  - 在 `CubicWanT2V` 中将 cond/uncond 两路 forward 改为统一走 selective 引擎（无 StepPlan 或 full step 自动走 full path 并刷新缓存）。
+- 变更依据：
+  - 对齐 [flexflow/docs/implement.md](../flexflow/docs/implement.md) 2.6（稀疏 attention）与 3.2（WAN 解耦入口）要求。
+  - 遵循“不改 origin runtime 模块主体、通过新增模块解耦接入”的约束。
+- 受影响文件：
+  - `wan_exp/cubic_selective_forward.py`（新增）
+  - `wan_exp/cubic_text2video.py`
+  - `worklog/cubic_worklog.md`
+- 验证命令与结果：
+  - 命令：`python3 -m py_compile wan_exp/cubic_selective_forward.py wan_exp/cubic_text2video.py flexflow/scheduler.py`
+  - 结果：通过（无输出）
+  - 命令：`source ./.venv/bin/activate && python launch.py --model wan --method cubic`
+  - 结果：本轮两次触发均被会话侧“skip”未执行（非代码异常），未获得新的端到端运行日志。
+
+## 2026-04-10（修复 selective 引擎 full 路径偏离 origin 的噪声问题）
+- 目标模块：
+  - `wan_exp/cubic_selective_forward.py`
+- 问题定位：
+  - 现象：首次 anchor 后 monitor/partition 可视化呈明显异常（近似噪声），即使在 full compute 场景也偏离历史正常分布。
+  - 根因：在 selective 引擎中错误复用了全局 `e0.chunk(6)`，没有按每个 block 执行 `block.modulation + e_time` 后再 `chunk(6)`。
+  - 影响：`WanAttentionBlock` 的调制项与 origin `block.forward` 不一致，导致 full 路径数值已偏移，进而污染 monitor 和后续分区。
+- 变更摘要：
+  - 将 `_selective_block_forward` 的调制逻辑改为与 origin 对齐：
+    - `with autocast(float32): e0..e5 = (block.modulation + e_time).chunk(6, dim=1)`
+  - 删除全局一次性 `e_chunks` 复用，改为每层 block 内实时计算。
+- 变更依据：
+  - 对齐 `wan_exp/wan/modules/model.py` 中 `WanAttentionBlock.forward` 的原始实现，保证 full 计算路径等价。
+- 受影响文件：
+  - `wan_exp/cubic_selective_forward.py`
+  - `worklog/cubic_worklog.md`
+- 验证命令与结果：
+  - 命令：`python3 -m py_compile wan_exp/cubic_selective_forward.py wan_exp/cubic_text2video.py`
+  - 结果：通过
+  - 命令：`source ./.venv/bin/activate && python launch.py --model wan --method cubic`
+  - 结果：通过，且关键指标恢复到历史合理区间：
+    - step=7：`curvature mean=1.385278e+02`，`chosen_block_size=(2,9,4)`，不再是异常 `(16,16,16)` 噪声分区
+    - selective 步日志正常出现：`[wan-step-plan]` 与 `[wan-selective]`
+    - 端到端输出完成：`cubic_two_anthropomorphic_cats_comfy_t2v-1.3B.mp4`
+
+## 2026-04-10（优化模式关闭 straightness 默认计算）
+- 目标模块：
+  - `wan_exp/cubic_generate.py`
+- 变更摘要：
+  - 新增命令行开关 `--straightness_eval`，默认 `False`。
+  - 将 `wan_t2v.generate(..., eval_straightness=...)` 从硬编码 `True` 改为读取该开关。
+  - 这样优化模式下默认仅使用轻量 curvature 代理，不再默认执行 straightness ground-truth 评估链路。
+- 变更依据：
+  - straightness 属于验证/对照（ground-truth）链路，不应在性能优化模式默认开启，避免额外前向计算开销。
+- 受影响文件：
+  - `wan_exp/cubic_generate.py`
+  - `worklog/cubic_worklog.md`
+- 验证命令与结果：
+  - 命令：`python3 -m py_compile wan_exp/cubic_generate.py wan_exp/cubic_text2video.py`
+  - 结果：通过（无语法错误输出）
     - 动态调整：块数从 92 → 68 → 101 → 62 → 35，随曲率变化（138.5 → 18.5 → 9.8 → 5.0 → 2.6）
     - 未见崩溃或数据不一致，partition.validate() 通过
     - log 显示所有 anchor blocks 计数、范围信息正常输出
+
 
 ## 2026-04-09（分区口径重构：全局 blocksize + 均匀 3D 切分）
 - 目标模块：
@@ -345,3 +457,24 @@
   - 可视化产物：
     - `results/wan/1.3B/cubic/two_anthropomorphic_cats_comfy/partition_vis/step_XXXX_frame_strip.png`
     - `results/wan/1.3B/cubic/two_anthropomorphic_cats_comfy/partition_vis/step_XXXX_partition_summary.txt`
+
+## 2026-04-13（修复 CFG 下两分支 cubic 决策不一致）
+- 目标模块：
+  - `wan_exp/cubic_text2video.py`
+- 变更摘要：
+  - 修复 2 卡 CFG 路径中仅 `rank0` 计算 partition/frequency/stepplan 的问题。
+  - 现在在 anchor/warmup-tail 上，两卡都会执行：
+    - `partitioner.partition(...)`
+    - `frequency_optimizer.optimize(...)`
+    - `step_scheduler.build_step_plan(...)`
+  - 仅把日志与可视化保留在 `rank0`，避免重复输出。
+  - CFG 路径判断改为 `get_cp_worldsize()==2` 后再获取 `cp_group`，避免单卡路径直接访问 CFG group。
+- 变更依据：
+  - CFG 并行下 cond/uncond 两分支必须共享同一 step 级 cubic 决策口径，否则会出现一支 selective、另一支 full 的行为漂移，造成质量下降与吞吐受限。
+- 受影响文件：
+  - `wan_exp/cubic_text2video.py`
+  - `worklog/cubic_worklog.md`
+- 验证命令与结果：
+  - 命令：`source ./.venv/bin/activate && python launch.py --model wan --method cubic --gpus 2`
+  - 结果：通过（端到端生成完成，输出视频与指标文件正常）。
+  - 关键观测：`step_timing_summary.json` 中 `avg_total_ms` 约从 3248ms 降至 1840ms，`avg_forward_ms` 约从 3080ms 降至 1673ms。

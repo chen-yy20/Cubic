@@ -27,8 +27,7 @@ def build_parser():
     parser.add_argument("--launcher", choices=["python", "srun"], default="srun", help="Launch backend")
     parser.add_argument("--script", default=None, help="Optional custom script path")
     parser.add_argument("--partition", default="debug", help="SLURM partition for srun")
-    parser.add_argument("--nnodes", type=int, default=1, help="Number of nodes for srun")
-    parser.add_argument("--gpus-per-node", type=int, default=1, help="GPUs per node for srun")
+    parser.add_argument("--gpus", type=int, default=1, help="GPUs per node for srun")
     parser.add_argument("--job-name", default="cubic-run", help="SLURM job name for srun")
     parser.add_argument("script_args", nargs=argparse.REMAINDER, help="Extra args passed to target script")
     return parser
@@ -68,7 +67,7 @@ def main():
     if args.launcher == "python":
         cmd = [sys.executable, script, *script_args]
     else:
-        env.update({"NNODES": str(args.nnodes), "GPUS_PER_NODE": str(args.gpus_per_node)})
+        env.update({"NNODES": "1", "GPUS_PER_NODE": str(args.gpus)})
         cmd = [
             "./pysrun.sh",
             script,

@@ -19,16 +19,31 @@ from dist.parallel_state import (
     init_distributed_environment,
 )
 from utils.results import get_prompt_id, save_params_and_metrics
-from utils.timer import get_time_statistics_dict, init_timer, print_time_statistics
+from utils.timer import get_time_statistics_dict, init_timer, print_time_statistics, save_time_stats_to_file
 
 init_timer()
 
 PROMPT = 'Two anthropomorphic cats in comfy boxing gear and bright gloves fight intensely on a spotlighted stage.'
 MODEL_PATH = "/home/chenyy/WORK/models/Wan2.1-T2V-1.3B"
+# Cubic optimizer / scheduler knobs
+SPEEDUP = 3
+WARMUP = 5
+COOLDOWN = 5
+ANCHOR_INTERVAL = 8
+
 
 TAG = 'cubic'
 model_id = '1.3B' if '1.3B' in MODEL_PATH else '14B'
 OUTPUT_DIR = f'./results/wan/{model_id}/cubic/{get_prompt_id(PROMPT)}'
+REQUIRED_TIMER_NAMES = [
+    'generate_e2e',
+    'anchor_step_monitor',
+    'anchor_step_partitioner',
+    'anchor_step_optimizer',
+    'anchor_step_total',
+    'selective_forward',
+    'warmup_cooldown_step',
+]
 
 rank = int(os.getenv('RANK', 0))
 world_size = int(os.getenv('WORLD_SIZE', 1))
@@ -182,6 +197,18 @@ def _parse_args():
         default='./results/wan',
         help='output_dir.',
     )
+    parser.add_argument(
+        '--enable_visualization',
+        type=str2bool,
+        default=False,
+        help='Enable visualization generation and related artifact export.',
+    )
+    parser.add_argument(
+        '--straightness_eval',
+        type=str2bool,
+        default=False,
+        help='Enable straightness ground-truth evaluation (expensive, default off for optimization runs).',
+    )
 
     args = parser.parse_args()
     args.task = 't2v-1.3B' if '1.3B' in MODEL_PATH else 't2v-14B'
@@ -231,8 +258,22 @@ def generate(args):
     if args.ulysses_size > 1:
         assert cfg.num_heads % args.ulysses_size == 0, '`num_heads` must be divisible by `ulysses_size`.'
 
+    # Adapt cubic hyperparameters from experiment entry to runtime config.
+    total_steps = max(int(args.sample_steps), 1)
+    cfg.target_speedup = float(SPEEDUP)
+    cfg.warmup_fraction = max(0.0, min(1.0, float(WARMUP) / float(total_steps)))
+    cfg.cooldown_fraction = max(0.0, min(1.0, float(COOLDOWN) / float(total_steps)))
+    cfg.anchor_interval = max(1, int(ANCHOR_INTERVAL))
+
     logging.info(f'Generation job args: {args}')
     logging.info(f'Generation model config: {cfg}')
+    logging.info(
+        'Cubic config override: target_speedup=%.3f warmup_fraction=%.4f cooldown_fraction=%.4f anchor_interval=%d',
+        float(cfg.target_speedup),
+        float(cfg.warmup_fraction),
+        float(cfg.cooldown_fraction),
+        int(cfg.anchor_interval),
+    )
 
     if dist.is_initialized():
         base_seed = [args.base_seed] if cur_rank == 0 else [None]
@@ -262,7 +303,8 @@ def generate(args):
         seed=args.base_seed,
         offload_model=args.offload_model,
         results_dir=args.output_dir,
-        eval_straightness=True,
+        eval_straightness=args.straightness_eval,
+        enable_visualization=args.enable_visualization,
     )
 
     if cur_rank == 0:
@@ -286,10 +328,14 @@ def generate(args):
 if __name__ == '__main__':
     args = _parse_args()
     generate(args)
-    print_time_statistics()
+    print_time_statistics(timer_names=REQUIRED_TIMER_NAMES)
 
     cur_rank = int(os.getenv('RANK', 0))
     if cur_rank == 0:
+        save_time_stats_to_file(
+            os.path.join(OUTPUT_DIR, 'timing_stats.txt'),
+            timer_names=REQUIRED_TIMER_NAMES,
+        )
         params = {
             'model': 'wan',
             'method': 'cubic',
@@ -304,7 +350,7 @@ if __name__ == '__main__':
             OUTPUT_DIR,
             TAG,
             params,
-            get_time_statistics_dict(),
+            get_time_statistics_dict(timer_names=REQUIRED_TIMER_NAMES),
             quality_metrics=None,
         )
         print(f'Params & metrics saved to {params_path}', flush=True)
