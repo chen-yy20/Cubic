@@ -16,6 +16,7 @@ SCRIPT_MAP = {
     },
     "flux": {
         "ori": "flux1_exp/ori_generate.py",
+        "cubic": "flux1_exp/cubic_generate.py",
     },
     "flux2k": {
         "ori": "flux2k_exp/ori_generate.py",

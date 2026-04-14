@@ -36,9 +36,15 @@ class PartitionVisualizer:
         output_dir: str,
         max_frames: int = 8,
         block_intervals: Dict[int, int] | None = None,
+        file_suffix: str | None = None,
     ) -> Dict[str, str]:
         vis_dir = os.path.join(output_dir, 'partition_vis')
         os.makedirs(vis_dir, exist_ok=True)
+
+        suffix = ''
+        if file_suffix:
+            safe_suffix = str(file_suffix).replace(os.sep, '_').replace(' ', '_')
+            suffix = f'_{safe_suffix}'
 
         summary_text = self._build_summary_text(
             partition=partition,
@@ -46,11 +52,11 @@ class PartitionVisualizer:
             block_intervals=block_intervals,
             step_idx=step_idx,
         )
-        summary_path = os.path.join(vis_dir, f'step_{step_idx:04d}_partition_summary.txt')
+        summary_path = os.path.join(vis_dir, f'step_{step_idx:04d}_partition_summary{suffix}.txt')
         with open(summary_path, 'w', encoding='utf-8') as f:
             f.write(summary_text)
 
-        frame_strip_path = os.path.join(vis_dir, f'step_{step_idx:04d}_frame_strip.png')
+        frame_strip_path = os.path.join(vis_dir, f'step_{step_idx:04d}_frame_strip{suffix}.png')
         frame_strip_frames = self._save_frame_strip(
             partition=partition,
             curvature_map=curvature_map,
@@ -236,6 +242,7 @@ class CubicVisualizer:
         step_idx: int,
         output_dir: str,
         max_frames: int = 8,
+        file_suffix: str | None = None,
     ) -> Dict[str, str]:
         return self.partition_visualizer.visualize_and_export(
             partition=partition,
@@ -245,6 +252,7 @@ class CubicVisualizer:
             output_dir=output_dir,
             max_frames=max_frames,
             block_intervals=block_intervals,
+            file_suffix=file_suffix,
         )
 
     def export_curvature_history(
@@ -255,13 +263,18 @@ class CubicVisualizer:
         save_raw: bool = False,
         save_strip: bool = False,
         save_meta: bool = False,
+        file_suffix: str | None = None,
     ):
         if not curvature_history:
             return
 
         vis_dir = os.path.join(output_dir, 'curvature_vis')
         os.makedirs(vis_dir, exist_ok=True)
-        self._clear_directory(vis_dir)
+
+        overview_name = 'curvature_overview.png'
+        if file_suffix:
+            safe_suffix = str(file_suffix).replace(os.sep, '_').replace(' ', '_')
+            overview_name = f'curvature_overview_{safe_suffix}.png'
 
         mean_tiles = []
         labels = []
@@ -304,10 +317,11 @@ class CubicVisualizer:
         self._save_heatmap_grid(
             mean_tiles,
             labels,
-            os.path.join(vis_dir, 'curvature_overview.png'),
+            os.path.join(vis_dir, overview_name),
             suptitle='Anchor Curvature Mean-HW Overview',
             cmap='turbo',
             cbar_label='curvature',
+            force_single_row=True,
         )
 
     def export_straightness_records(self, records, output_dir: str):
@@ -424,13 +438,18 @@ class CubicVisualizer:
         suptitle: str,
         cmap: str,
         cbar_label: str,
+        force_single_row: bool = False,
     ):
         if not maps:
             raise ValueError('no maps to visualize')
 
         count = len(maps)
-        cols = min(3, count)
-        rows = (count + cols - 1) // cols
+        if force_single_row:
+            rows = 1
+            cols = count
+        else:
+            cols = min(3, count)
+            rows = (count + cols - 1) // cols
         fig, axes = plt.subplots(rows, cols, figsize=(5 * cols, 4.2 * rows), dpi=150)
         axes = np.array(axes).reshape(rows, cols)
 

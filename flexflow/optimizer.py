@@ -35,6 +35,8 @@ class UpdateFrequencyOptimizer:
         self.tau_min = int(getattr(config, 'tau_min', 1))
         self.tau_max = int(getattr(config, 'tau_max', 10))
         self.target_speedup = float(getattr(config, 'target_speedup', 2.0))
+        # Optional contrast gain: >1 amplifies curvature differences before tau mapping.
+        self.curvature_contrast_gamma = float(getattr(config, 'curvature_contrast_gamma', 1.0))
         self.eps = 1e-8
 
     def optimize(self, partition, block_curvatures: Dict[int, float]) -> FrequencyPlan:
@@ -66,8 +68,12 @@ class UpdateFrequencyOptimizer:
             kappas.append(max(kappa, self.eps))
 
         kappa_arr = np.asarray(kappas, dtype=np.float64)
+        gamma = max(float(self.curvature_contrast_gamma), self.eps)
+        kappa_ref = max(float(np.median(kappa_arr)), self.eps)
+        kappa_scaled = np.power(np.maximum(kappa_arr / kappa_ref, self.eps), gamma)
+
         exponent = -self.alpha / (self.beta + 1.0)
-        raw_tau = np.power(kappa_arr, exponent)
+        raw_tau = np.power(kappa_scaled, exponent)
 
         # Normalize to satisfy mean(1/tau) = 1/target_speedup.
         inv_raw_mean = float(np.mean(1.0 / np.maximum(raw_tau, self.eps)))

@@ -1,5 +1,129 @@
 # Cubic 工作日志
 
+## 2026-04-14（flux step31 过细分块修正：加入 block token 上下限）
+- 目标模块：
+  - `flexflow/partition.py`
+  - `flux1_exp/flux_cubic/pipeline.py`
+- 变更摘要：
+  - 在 `AdaptivePartitioner` 中新增候选筛选约束：`min_block_tokens` / `max_block_tokens`。
+  - block size 搜索时，先计算所有候选指标，再优先在 token 数满足区间的候选中选最优；若区间内无候选，再回退到全候选，保证鲁棒性。
+  - 在 Flux cubic pipeline 中设置并同步：`min_block_tokens=16`、`max_block_tokens=256`，避免出现 `(1,2,2)` 这类过细分块。
+- 变更依据：
+  - `step_0031_partition_summary_seed43.txt` 显示旧策略在仅用 CV 一致性选型时会偏向过细块（`selected_block_size=(1,2,2)`，1024 blocks），与“不过粗不过细”的目标不符。
+  - 对齐“全局 blocksize 选择”目标，在一致性之外加入显式尺度约束。
+- 受影响文件：
+  - `flexflow/partition.py`
+  - `flux1_exp/flux_cubic/pipeline.py`
+  - `worklog/cubic_worklog.md`
+- 验证命令与结果：
+  - 命令：`source ./.venv/bin/activate && python -m py_compile flexflow/partition.py flux1_exp/flux_cubic/pipeline.py`
+  - 结果：通过（无输出，退出码 0）
+  - 命令：`source ./.venv/bin/activate && python launch.py --model flux --method cubic`
+  - 结果：通过。
+  - 观测：`step_0031_partition_summary_seed43.txt` 的 `selected_block_size` 由 `(1,2,2)` 变为 `(1,8,2)`；`step_0031_partition_summary_seed42.txt` 为 `(1,4,4)`，block tokens 均为 16，未再出现过细 4-token 分块。
+
+## 2026-04-14（flux tau 区分度修正：曲率对比度增益 + 配置同步）
+- 目标模块：
+  - `flexflow/optimizer.py`
+  - `flux1_exp/flux_cubic/pipeline.py`
+- 变更摘要：
+  - 在 `UpdateFrequencyOptimizer` 中新增 `curvature_contrast_gamma`，在 `tau` 映射前先做曲率对比度放大：
+    - `kappa_scaled = (kappa / median(kappa)) ** gamma`
+    - 再执行 `tau ∝ kappa_scaled^{-alpha/(beta+1)}`。
+  - 在 `CubicFluxPipeline` 中补充 `_sync_cubic_modules_config()`，确保运行时参数（`target_speedup/alpha/beta/tau_range/blocksize`）真实同步到 partitioner/optimizer，而非只改 pipeline 字段。
+  - 为 flux 默认启用较强的曲率区分增益：`curvature_contrast_gamma = 1.8`。
+- 变更依据：
+  - 结合 `partition_summary` 观察：在粗分块阶段（如 `(1,16,16)`）曲率差异存在但共享映射灵敏度不足，离散后大量塌缩到 `tau=2`。
+  - 该修正保持算法框架不变，只增强曲率到 `tau` 的单调映射对比度，适配 flux 图像场景的曲率分布特征。
+- 受影响文件：
+  - `flexflow/optimizer.py`
+  - `flux1_exp/flux_cubic/pipeline.py`
+  - `worklog/cubic_worklog.md`
+- 验证命令与结果：
+  - 命令：`source ./.venv/bin/activate && python -m py_compile flexflow/optimizer.py flux1_exp/flux_cubic/pipeline.py`
+  - 结果：通过（无输出，退出码 0）
+  - 命令：`source ./.venv/bin/activate && python launch.py --model flux --method cubic`
+  - 结果：通过，`anchor_step_partitioner/anchor_step_optimizer` 计时正常。
+  - 观测：`step_0007_partition_summary_seed42.txt` 中 `interval_stats` 由先前几乎全 `tau=2` 变为 `min=1, max=3, mean=2.19`，分化明显提升。
+
+## 2026-04-14（flux1 第二阶段：anchor 分块与 tau 分配）
+- 目标模块：
+  - `flux1_exp/flux_cubic/pipeline.py`
+  - `flexflow/visualizer.py`
+  - `flux1_exp/cubic_generate.py`
+- 变更摘要：
+  - 在 Flux cubic 的 anchor 步中接入 `AdaptivePartitioner` 与 `UpdateFrequencyOptimizer`。
+  - 监测链路更新为：`monitor.update -> partitioner.partition -> monitor.get_block_curvatures -> optimizer.optimize`。
+  - 新增分块与 `tau` 可视化导出调用：`visualize_partition_and_frequency(...)`。
+  - 为分块可视化新增 `file_suffix` 支持，避免多 seed 下 `partition_vis` 文件相互覆盖。
+  - 在 flux 入口中传递 `cubic_target_speedup=SPEEDUP`，用于 `tau` 分配目标约束。
+- 变更依据：
+  - 对齐 [flexflow/docs/implement.md](../flexflow/docs/implement.md) 的 2.4（全局 blocksize + 均匀切分）与 2.5（`tau_b` 优化分配）。
+  - 保持第一阶段策略：先在 anchor 步完成观测与调度，selective forward 仍后续迭代接入。
+- 受影响文件：
+  - `flux1_exp/flux_cubic/pipeline.py`
+  - `flexflow/visualizer.py`
+  - `flux1_exp/cubic_generate.py`
+  - `worklog/cubic_worklog.md`
+- 验证命令与结果：
+  - 命令：`source ./.venv/bin/activate && python -m py_compile flux1_exp/flux_cubic/pipeline.py flexflow/visualizer.py flux1_exp/cubic_generate.py`
+  - 结果：通过（无输出，退出码 0）
+  - 命令：`source ./.venv/bin/activate && python launch.py --model flux --method cubic`
+  - 结果：通过，计时统计中出现 `anchor_step_partitioner` 与 `anchor_step_optimizer`。
+  - 说明：当前 `flux1_exp/cubic_generate.py` 中 `curvature_visualize=False` 时不会导出可视化文件；设为 `True` 即会输出曲率与分块/tau 可视化。
+
+## 2026-04-14（flux1 curvature 可视化防覆写 + 单行排版）
+- 目标模块：
+  - `flexflow/visualizer.py`
+  - `flux1_exp/flux_cubic/pipeline.py`
+  - `flux1_exp/cubic_generate.py`
+- 变更摘要：
+  - 为曲率总览导出新增 `file_suffix` 参数，支持按运行标签输出不同文件名（例如 `curvature_overview_seed42.png`）。
+  - 调整 `curvature_overview` 排版为固定单行多列（1 行，anchor steps 按列展示）。
+  - 在 flux cubic 调用链中新增 `cubic_visual_tag`，并按 seed 传递，确保 3 个 seed 产生 3 张曲率总览图。
+  - 保留历史可视化文件，不再在每次导出曲率时清空目录，避免多 seed 运行互相覆盖。
+- 变更依据：
+  - 满足“多 seed 生成应得到多张 curvature overview”与“overview 改为单行排版”的可视化需求。
+  - 不改动 monitor 曲率计算逻辑，仅调整可视化导出策略与调用参数。
+- 受影响文件：
+  - `flexflow/visualizer.py`
+  - `flux1_exp/flux_cubic/pipeline.py`
+  - `flux1_exp/cubic_generate.py`
+  - `worklog/cubic_worklog.md`
+- 验证命令与结果：
+  - 命令：`source ./.venv/bin/activate && python -m py_compile flexflow/visualizer.py flux1_exp/flux_cubic/pipeline.py flux1_exp/cubic_generate.py`
+  - 结果：通过（无输出，退出码 0）
+  - 命令：`source ./.venv/bin/activate && python launch.py --model flux --method cubic`
+  - 结果：通过，生成 `curvature_overview_seed42.png`、`curvature_overview_seed43.png`、`curvature_overview_seed44.png`。
+
+## 2026-04-14（flux1 第一阶段：分阶段 pipeline + anchor monitor + 可视化）
+- 目标模块：
+  - `flux1_exp/flux_cubic/pipeline.py`
+  - `flux1_exp/cubic_generate.py`
+  - `launch.py`
+  - `flux1_exp/flux_cubic/__init__.py`
+- 变更摘要：
+  - 新增 `CubicFluxPipeline`，在 Flux 图像生成路径中加入与 WAN 对齐的阶段判定逻辑：warmup / cruise(anchor/selective) / cooldown。
+  - 在 warmup 尾步与 cruise anchor 步接入 `flexflow.CurvatureMonitor`，并将 Flux 的 packed latent/noise 还原为 5D 形状后再进行 monitor 更新。
+  - 接入 `flexflow.CubicVisualizer` 导出曲率总览图（`curvature_vis/curvature_overview.png`）。
+  - 新增 `flux1_exp/cubic_generate.py` 作为独立 cubic 入口脚本，保持 origin 入口不改动。
+  - 在 `launch.py` 中新增 `flux` 模型族的 `cubic` 路由，支持 `python launch.py --model flux --method cubic`。
+- 变更依据：
+  - 对齐 [flexflow/docs/implement.md](../flexflow/docs/implement.md) 的 2.1（三阶段推理）与 2.2（anchor step）规范。
+  - 对齐 4.4 monitor 约定：anchor 使用 endpoint drift 更新曲率，并在进入公式前将 timestep 归一化到 `[0, 1]`。
+  - 按“保留 origin runtime”的要求，采用新增 `flux_cubic` 模块和独立入口脚本实现。
+- 受影响文件：
+  - `flux1_exp/flux_cubic/__init__.py`（新增）
+  - `flux1_exp/flux_cubic/pipeline.py`（新增）
+  - `flux1_exp/cubic_generate.py`（新增实现）
+  - `launch.py`（新增 flux cubic 映射）
+  - `worklog/cubic_worklog.md`
+- 验证命令与结果：
+  - 命令：`source ./.venv/bin/activate && python -m py_compile flux1_exp/flux_cubic/pipeline.py flux1_exp/cubic_generate.py launch.py`
+  - 结果：通过（无输出，退出码 0）
+  - 命令：`source ./.venv/bin/activate && python launch.py --model flux --method cubic`
+  - 结果：通过，完成 3 张图片生成并输出计时统计；曲率可视化已写入 `results/flux/cubic/photorealistic_cute_cat,_wearing_2x/curvature_vis/`。
+
 ## 2026-04-14（flux1 baseline ori_generate 清理）
 - 目标模块：
   - `flux1_exp/ori_generate.py`
