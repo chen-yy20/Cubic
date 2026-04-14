@@ -7,7 +7,14 @@ import torch
 from tqdm import tqdm
 
 from flux.pipeline import FluxPipeline, calculate_shift, retrieve_timesteps
-from flexflow import AdaptivePartitioner, CurvatureMonitor, CubicVisualizer, UpdateFrequencyOptimizer
+from flexflow import (
+    AdaptivePartitioner,
+    CurvatureMonitor,
+    CubicVisualizer,
+    Phase,
+    SelectiveStepScheduler,
+    UpdateFrequencyOptimizer,
+)
 from utils.timer import get_timer
 
 from diffusers.models.autoencoders import AutoencoderKL
@@ -15,6 +22,7 @@ from diffusers.schedulers import FlowMatchEulerDiscreteScheduler
 from transformers import CLIPTextModel, CLIPTokenizer, T5EncoderModel, T5TokenizerFast
 
 from flux.transformer import FluxTransformer2DModel
+from flux_cubic.cubic_selective_forward import FluxSelectiveForwardEngine
 
 
 class CubicFluxPipeline(FluxPipeline):
@@ -63,6 +71,11 @@ class CubicFluxPipeline(FluxPipeline):
         self.visualizer = CubicVisualizer(self)
         self.partitioner = AdaptivePartitioner(self)
         self.frequency_optimizer = UpdateFrequencyOptimizer(self)
+        self.step_scheduler = SelectiveStepScheduler(self)
+        self.selective_forward = FluxSelectiveForwardEngine(self)
+        self.current_partition = None
+        self.current_frequency_plan = None
+        self.current_step_plan = None
 
     def _get_inference_phase(self, step: int, total_steps: int) -> str:
         if total_steps <= 0:
@@ -136,6 +149,10 @@ class CubicFluxPipeline(FluxPipeline):
         self._sync_cubic_modules_config()
 
         self.monitor.reset()
+        self.selective_forward.reset()
+        self.current_partition = None
+        self.current_frequency_plan = None
+        self.current_step_plan = None
 
         height = height or self.default_sample_size * self.vae_scale_factor
         width = width or self.default_sample_size * self.vae_scale_factor
@@ -234,20 +251,35 @@ class CubicFluxPipeline(FluxPipeline):
                     continue
 
                 phase = self._get_inference_phase(i, len(timesteps))
+                phase_enum = self._phase_to_enum(phase)
 
                 timestep = t.expand(latents.shape[0]).to(latents.dtype)
 
-                noise_pred = self.transformer(
-                    hidden_states=latents,
-                    timestep=timestep / 1000,
-                    guidance=guidance,
-                    pooled_projections=pooled_prompt_embeds,
-                    encoder_hidden_states=prompt_embeds,
-                    txt_ids=text_ids,
-                    img_ids=latent_image_ids,
-                    joint_attention_kwargs=self.joint_attention_kwargs,
-                    return_dict=False,
-                )[0]
+                if self.current_partition is not None and self.current_frequency_plan is not None:
+                    selective_step_idx = max(0, i - warmup_steps)
+                    self.current_step_plan = self.step_scheduler.build_step_plan(
+                        partition=self.current_partition,
+                        block_intervals=self.current_frequency_plan.block_intervals,
+                        phase=phase_enum,
+                        step_idx=i,
+                        selective_step_idx=selective_step_idx,
+                    )
+
+                step_plan = self.current_step_plan if phase == "phase3_cruise_selective" else None
+                with get_timer("selective_forward" if step_plan is not None else "full_forward"):
+                    noise_pred = self.selective_forward.forward(
+                        transformer=self.transformer,
+                        hidden_states=latents,
+                        timestep=timestep,
+                        guidance=guidance,
+                        pooled_projections=pooled_prompt_embeds,
+                        encoder_hidden_states=prompt_embeds,
+                        txt_ids=text_ids,
+                        img_ids=latent_image_ids,
+                        joint_attention_kwargs=self.joint_attention_kwargs,
+                        step_plan=step_plan,
+                        cache_key="flux",
+                    )
 
                 is_last_warmup = warmup_steps > 0 and phase == "phase1_warmup" and i == warmup_steps - 1
                 is_cruise_anchor = phase == "phase2_cruise_anchor"
@@ -280,6 +312,15 @@ class CubicFluxPipeline(FluxPipeline):
                             frequency_plan = self.frequency_optimizer.optimize(
                                 partition=partition,
                                 block_curvatures=block_curvatures,
+                            )
+                            self.current_partition = partition
+                            self.current_frequency_plan = frequency_plan
+                            self.current_step_plan = self.step_scheduler.build_step_plan(
+                                partition=partition,
+                                block_intervals=frequency_plan.block_intervals,
+                                phase=Phase.CRUISE_ANCHOR,
+                                step_idx=i,
+                                selective_step_idx=max(0, i - warmup_steps),
                             )
 
                         if cubic_enable_visualization and cubic_results_dir:
@@ -335,6 +376,16 @@ class CubicFluxPipeline(FluxPipeline):
         from diffusers.pipelines.flux.pipeline_output import FluxPipelineOutput
 
         return FluxPipelineOutput(images=image)
+
+    @staticmethod
+    def _phase_to_enum(phase_name: str) -> Phase:
+        if phase_name == "phase1_warmup":
+            return Phase.WARMUP
+        if phase_name == "phase2_cruise_anchor":
+            return Phase.CRUISE_ANCHOR
+        if phase_name == "phase3_cruise_selective":
+            return Phase.CRUISE_SELECTIVE
+        return Phase.COOLDOWN
 
     def _sync_cubic_modules_config(self) -> None:
         # Partitioner configs

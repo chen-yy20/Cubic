@@ -1,5 +1,28 @@
 # Cubic 工作日志
 
+## 2026-04-14（flux selective forward 首版接入）
+- 目标模块：
+  - `flux1_exp/flux_cubic/cubic_selective_forward.py`
+  - `flux1_exp/flux_cubic/pipeline.py`
+- 变更摘要：
+  - 新增 Flux 侧 `FluxSelectiveForwardEngine`，在 `phase3_cruise_selective` 中执行 active token 前向，并使用上一轮缓存的 velocity 对 frozen token 回填。
+  - 在 `CubicFluxPipeline` 中接入 `SelectiveStepScheduler` 与 selective engine：
+    - anchor/warmup/cooldown 仍走 full forward 并刷新缓存；
+    - cruise 非 anchor 根据 `partition + tau` 生成 `StepPlan`，驱动 selective forward。
+  - 针对 Flux 与 WAN 映射差异，增加了 `hidden_states` token 序列与 `img_ids` 的一致性校验（长度/索引范围），异常时自动回退 full forward，避免 token 错位更新。
+- 变更依据：
+  - 对齐 `flexflow/docs/implement.md` 中 2.2（anchor 刷新）与 2.6（cruise 非 anchor selective）的流程约束。
+  - 参考 `wan_exp/wan_cubic/cubic_selective_forward.py` 的缓存式接口组织，同时按 Flux 的 `[B,L,C]` packed latent 序列语义适配 token 索引。
+- 受影响文件：
+  - `flux1_exp/flux_cubic/cubic_selective_forward.py`（新增）
+  - `flux1_exp/flux_cubic/pipeline.py`
+  - `worklog/cubic_worklog.md`
+- 验证命令与结果：
+  - 命令：`source ./.venv/bin/activate && python -m py_compile flux1_exp/flux_cubic/cubic_selective_forward.py flux1_exp/flux_cubic/pipeline.py`
+  - 结果：通过（无语法错误）
+  - 命令：`source ./.venv/bin/activate && python launch.py --model flux --method cubic`
+  - 结果：通过，三 seed 端到端完成，计时中可见 `selective_forward` 栈（93 次调用），流程可执行。
+
 ## 2026-04-14（flux step31 过细分块修正：加入 block token 上下限）
 - 目标模块：
   - `flexflow/partition.py`

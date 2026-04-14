@@ -16,16 +16,16 @@ GUIDANCE_SCALE = 3.5
 NUM_IMAGES = 3
 SEEDS = [42 + i for i in range(NUM_IMAGES)]
 
-SPEEDUP = 2
+SPEEDUP = 3
 WARMUP_FRACTION = 0.15
 COOLDOWN_FRACTION = 0.15
-ANCHOR_INTERVAL = 8
+ANCHOR_INTERVAL = 10
 
 TAG = "cubic"
 OUTPUT_DIR = f"./results/flux/{TAG}/{get_prompt_id(PROMPT)}_{SPEEDUP}x"
 MODEL_ID = os.path.basename(MODEL_PATH.rstrip("/"))
 
-curvature_visualize = True
+curvature_visualize = False # Set to True to enable curvature visualization, which will store curvature maps and token selection maps for each step in the specified results directory. This is useful for analyzing the behavior of the cubic scheduling, but will consume more storage and slightly more time due to the additional I/O operations.
 
 
 def load_pipeline(model_path: str) -> CubicFluxPipeline:
