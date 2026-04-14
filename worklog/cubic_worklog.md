@@ -1,5 +1,25 @@
 # Cubic 工作日志
 
+## 2026-04-14（flux cubic 接入 quality eval）
+- 目标模块：
+  - `flux1_exp/cubic_generate.py`
+- 变更摘要：
+  - 参照 WAN 的入口逻辑，在 Flux cubic 生成后接入 `evaluate_quality_with_origin(...)`。
+  - 按 seed 对每张生成图执行图像质量评测，并将结果写入 `per_seed`。
+  - 对 `psnr/ssim/lpips/fid/fvd` 计算跨 seed 均值，写入 `mean`。
+  - 将 `quality_metrics` 一并保存到 `cubic_params_metrics.json`，并在参数中记录 `quality_eval` 开关。
+- 变更依据：
+  - 对齐 WAN 的质量评测闭环：生成产物后立即与 `ori` 基线做同 prompt/seed 对比，并统一回写到 params+metrics 文件。
+  - Flux 为多 seed 图像输出，采用“逐图评测 + 汇总均值”更便于横向比较。
+- 受影响文件：
+  - `flux1_exp/cubic_generate.py`
+  - `worklog/cubic_worklog.md`
+- 验证命令与结果：
+  - 命令：`source ./.venv/bin/activate && python -m py_compile flux1_exp/cubic_generate.py`
+  - 结果：通过。
+  - 命令：`source ./.venv/bin/activate && python launch.py --model flux --method cubic`
+  - 结果：通过，3 seed 生成完成并完成质量评测，`cubic_params_metrics.json` 已包含 `quality_metrics`。
+
 ## 2026-04-14（flux selective forward 首版接入）
 - 目标模块：
   - `flux1_exp/flux_cubic/cubic_selective_forward.py`
