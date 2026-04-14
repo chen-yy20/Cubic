@@ -1,6 +1,6 @@
 # cubic
 
-本仓库用于统一管理多模型推理实验（origin / cubic），当前支持通过 `launch.py` 启动 WAN、FireRed、Flux2-klein 等实验脚本。
+本仓库用于统一管理多模型推理实验（origin / cubic），当前支持通过 `launch.py` 启动 WAN、Flux1、FireRed、Flux2-klein 等实验脚本。
 
 ## 1. 环境配置
 
@@ -61,6 +61,8 @@ python launch.py --model <model> --method <method> [--launcher python|srun] [--g
 
 - `wan + ori` -> `wan_exp/ori_generate.py`
 - `wan + cubic` -> `wan_exp/cubic_generate.py`
+- `flux + ori` -> `flux1_exp/ori_generate.py`
+- `flux + cubic` -> `flux1_exp/cubic_generate.py`
 - `firered + ori` -> `firered_exp/ori_generate.py`
 - `flux2k + ori` -> `flux2k_exp/ori_generate.py`
 
@@ -123,7 +125,15 @@ python launch.py --model flux2k --method ori --launcher python
 python launch.py --model flux2k --method ori --launcher python -- --height 768 --width 768
 ```
 
-## 4. WAN 上进行 cubic 实验
+### 3.4 Flux1 origin
+
+```bash
+python launch.py --model flux --method ori --launcher python
+```
+
+## 4. Cubic 实验
+
+### 4.1 WAN cubic
 
 基础命令：
 
@@ -138,6 +148,23 @@ python launch.py --model wan --method cubic --launcher python
 source .venv/bin/activate
 python launch.py --model wan --method cubic --gpus 2
 ```
+
+### 4.2 Flux1 cubic
+
+基础命令：
+
+```bash
+source .venv/bin/activate
+python launch.py --model flux --method cubic
+```
+
+当前 Flux1 cubic 已接入：
+
+- 三阶段推理（warmup / cruise-anchor / cruise-selective / cooldown）
+- anchor 步监测、分块与频率分配
+- selective forward 路径（phase3）
+- 曲率与分块可视化导出（可开关）
+- 生成后质量评测（按 seed 评测并汇总 mean）
 
 ## 5. 输出文件位置与含义
 
@@ -202,13 +229,33 @@ results/flux2/<model_id>/ori/<prompt_id>/
 - `ori_<prompt_id>_<model_id>.png`：生成图片。
 - `ori_params_metrics.json`：参数与计时统计。
 
-### 5.5 质量指标（WAN）说明
+### 5.5 Flux1 cubic 输出目录
 
-WAN 路径会调用质量评估并写入日志/JSON，常见指标：
+```text
+results/flux/cubic/<prompt_id>_<speedup>x/
+```
+
+常见文件与含义：
+
+- `cubic_<prompt_id>_seed<seed>.png`
+	- 含义：每个 seed 的最终生成图片。
+- `cubic_params_metrics.json`
+	- 含义：参数、计时统计、质量评测结果（`per_seed` 与 `mean`）。
+- `curvature_vis/curvature_overview_seed<seed>.png`（开启可视化时）
+	- 含义：按 seed 导出的曲率总览图。
+- `partition_vis/step_XXXX_frame_strip_seed<seed>.png`（开启可视化时）
+	- 含义：anchor 步分块与 tau 可视化条带图。
+- `partition_vis/step_XXXX_partition_summary_seed<seed>.txt`（开启可视化时）
+	- 含义：对应 anchor 步的分块统计与频率分配摘要。
+
+### 5.6 质量指标（WAN / Flux）说明
+
+WAN 与 Flux 路径都可调用质量评估并写入日志/JSON，常见指标：
 
 - `PSNR` / `SSIM`：保真度指标。
 - `LPIPS`：感知差异指标（越低通常越接近 baseline）。
 - `FID` / `FVD`：分布级图像/视频质量距离指标。
+	- 图像任务（Flux）通常仅有 `FID`，`FVD` 可能为 `null`。
 
 ## 6. 重点超参数说明（WAN cubic）
 

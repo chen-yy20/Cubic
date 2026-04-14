@@ -1,5 +1,23 @@
 # Cubic 工作日志
 
+## 2026-04-14（README 同步 Flux1 cubic 能力与使用说明）
+- 目标模块：
+  - `README.md`
+- 变更摘要：
+  - 更新仓库总览，明确支持 `flux` 的 `ori/cubic` 启动映射。
+  - 补充 Flux1 origin 启动示例与 Flux1 cubic 运行入口。
+  - 在 cubic 章节补充 Flux1 已实现能力：三阶段流程、anchor 监测分块优化、phase3 selective forward、可视化导出、质量评测汇总。
+  - 在输出章节补充 Flux1 cubic 目录结构与关键产物说明（图片、params_metrics、curvature/partition 可视化）。
+  - 将质量指标章节从 WAN 扩展为 WAN/Flux，并说明 Flux 图像场景下 `FVD` 可能为空。
+- 变更依据：
+  - 对齐当天已完成的 Flux1 cubic 实装进展，避免 README 与实际可运行功能不一致。
+- 受影响文件：
+  - `README.md`
+  - `worklog/cubic_worklog.md`
+- 验证命令与结果：
+  - 命令：`source ./.venv/bin/activate && python launch.py --model flux --method cubic`
+  - 结果：通过（本次文档更新未引入代码路径变更）。
+
 ## 2026-04-14（flux cubic 接入 quality eval）
 - 目标模块：
   - `flux1_exp/cubic_generate.py`
