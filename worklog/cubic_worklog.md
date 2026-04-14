@@ -1,5 +1,22 @@
 # Cubic 工作日志
 
+## 2026-04-14（flux1 baseline ori_generate 清理）
+- 目标模块：
+  - `flux1_exp/ori_generate.py`
+- 变更摘要：
+  - 删除了所有与 `jano` 相关的代码、环境变量和质量评估分支。
+  - 将入口整理为纯 `ori` baseline：统一加载模型、执行 warmup、逐 seed 生成并落盘。
+  - 将结果保存逻辑收敛为与 WAN origin 类似的 `params + timing_stats` 写盘方式，质量指标固定为 `None`。
+- 变更依据：
+  - 按照“保留 baseline、去掉前置加速实验逻辑”的要求，先把 flux1 的 origin 入口理顺，再进入后续 cubic 版本。
+  - 落盘结构沿用 `results/flux/ori/{prompt_id}`，便于与其他 origin 入口保持一致。
+- 受影响文件：
+  - `flux1_exp/ori_generate.py`
+  - `worklog/cubic_worklog.md`
+- 验证命令与结果：
+  - 命令：`source ./.venv/bin/activate && python -m py_compile flux1_exp/ori_generate.py`
+  - 结果：通过（无输出，退出码 0）
+
 ## 2026-04-08
 - 目标模块：`wan_exp/wan/text2video.py`
 - 变更摘要：

@@ -14,6 +14,9 @@ SCRIPT_MAP = {
     "firered": {
         "ori": "firered_exp/ori_generate.py",
     },
+    "flux": {
+        "ori": "flux1_exp/ori_generate.py",
+    },
     "flux2k": {
         "ori": "flux2k_exp/ori_generate.py",
     }
