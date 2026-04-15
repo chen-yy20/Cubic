@@ -1,5 +1,24 @@
 # Cubic 工作日志
 
+## 2026-04-15（flux selective attention 修正：encoder 全量保留，仅 image 做 selection+KV cache）
+- 目标模块：
+  - `flux1_exp/flux_cubic/cubic_selective_forward.py`
+- 变更摘要：
+  - 在 Flux selective attention 中明确划分 token 角色：
+    - `encoder hidden states` 全量参与序列拼接与注意力计算，不参与 selection，不进入 KV cache 的更新索引。
+    - `image hidden states` 才按 `active_token_indices` 走 selective 计算，并按 layer 维护/更新 image KV cache。
+  - 将 single block 中基于 runtime 的前缀长度字段从 `text_tokens` 收敛为 `encoder_tokens`，并加上边界校验，避免误把 encoder 纳入 image selection 逻辑。
+  - 修复 Flux rotary embedding 切片错误：`image_rotary_emb` 在 diffusers 中为 `(cos, sin)` 二元组，新增 `_slice_rotary_emb(...)` 按序列维切分后再传给 `apply_rotary_emb`，避免 tuple 直接切片导致的空频率输入。
+- 变更依据：
+  - 对齐 `flexflow/docs/implement.md` 2.6：选择性稀疏前向仅优化 image token，条件信息（encoder/context）应保持全量参与，确保条件一致性。
+  - 保持 origin 接口不变，仅在 `flux_cubic` 解耦模块内部修正 selective+cache 路径。
+- 受影响文件：
+  - `flux1_exp/flux_cubic/cubic_selective_forward.py`
+  - `worklog/cubic_worklog.md`
+- 验证命令与结果：
+  - 命令：`source ./.venv/bin/activate && python launch.py --model flux --method cubic`
+  - 结果：通过。3 个 seed 端到端运行完成，生成与质量评测流程正常，计时统计中 `selective_forward/full_forward` 均正常出现。
+
 ## 2026-04-14（README 同步 Flux1 cubic 能力与使用说明）
 - 目标模块：
   - `README.md`
