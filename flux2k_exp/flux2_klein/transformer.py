@@ -155,6 +155,8 @@ class Flux2AttnProcessor:
             query = apply_rotary_emb(query, image_rotary_emb, sequence_dim=1)
             key = apply_rotary_emb(key, image_rotary_emb, sequence_dim=1)
 
+        # kv cache update and reuse
+
         hidden_states = dispatch_attention_fn(
             query,
             key,
@@ -271,6 +273,7 @@ class Flux2ParallelSelfAttnProcessor:
         attention_mask: torch.Tensor | None = None,
         image_rotary_emb: torch.Tensor | None = None,
     ) -> torch.Tensor:
+        print(f"single_attn: {hidden_states.shape=}, {image_rotary_emb[0].shape=}, {image_rotary_emb[1].shape=}", flush=True)
         # Parallel in (QKV + MLP in) projection
         hidden_states = attn.to_qkv_mlp_proj(hidden_states)
         qkv, mlp_hidden_states = torch.split(
@@ -290,6 +293,8 @@ class Flux2ParallelSelfAttnProcessor:
         if image_rotary_emb is not None:
             query = apply_rotary_emb(query, image_rotary_emb, sequence_dim=1)
             key = apply_rotary_emb(key, image_rotary_emb, sequence_dim=1)
+
+        # kv cache update and reuse
 
         hidden_states = dispatch_attention_fn(
             query,

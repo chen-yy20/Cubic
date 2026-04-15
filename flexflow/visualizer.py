@@ -37,6 +37,7 @@ class PartitionVisualizer:
         max_frames: int = 8,
         block_intervals: Dict[int, int] | None = None,
         file_suffix: str | None = None,
+        block_value_label: str = 'tau',
     ) -> Dict[str, str]:
         vis_dir = os.path.join(output_dir, 'partition_vis')
         os.makedirs(vis_dir, exist_ok=True)
@@ -51,6 +52,7 @@ class PartitionVisualizer:
             block_curvatures=block_curvatures,
             block_intervals=block_intervals,
             step_idx=step_idx,
+            block_value_label=block_value_label,
         )
         summary_path = os.path.join(vis_dir, f'step_{step_idx:04d}_partition_summary{suffix}.txt')
         with open(summary_path, 'w', encoding='utf-8') as f:
@@ -65,6 +67,7 @@ class PartitionVisualizer:
             step_idx=step_idx,
             save_path=frame_strip_path,
             max_frames=max_frames,
+            block_value_label=block_value_label,
         )
 
         return {
@@ -80,6 +83,7 @@ class PartitionVisualizer:
         block_curvatures: Dict[int, float],
         block_intervals: Dict[int, int] | None,
         step_idx: int,
+        block_value_label: str = 'tau',
     ) -> str:
         blocks = list(partition)
         token_counts = [block.token_count for block in blocks]
@@ -104,22 +108,23 @@ class PartitionVisualizer:
         lines.append('curvature_stats=' + self._format_stats(curvatures, scientific=True))
 
         if intervals:
-            lines.append('interval_stats=' + self._format_stats(intervals))
-            rates = [1.0 / max(v, 1) for v in intervals]
-            lines.append('update_rate_stats=' + self._format_stats(rates, scientific=True))
+            lines.append(f'{block_value_label}_stats=' + self._format_stats(intervals))
+            if block_value_label == 'tau':
+                rates = [1.0 / max(v, 1) for v in intervals]
+                lines.append('update_rate_stats=' + self._format_stats(rates, scientific=True))
 
         lines.append('block_detail:')
         for block in blocks:
             curv = block_curvatures.get(block.block_id, 0.0)
-            tau_str = ''
+            value_str = ''
             if block_intervals is not None:
-                tau_str = f' tau={int(block_intervals.get(block.block_id, 1))}'
+                value_str = f' {block_value_label}={int(block_intervals.get(block.block_id, 1))}'
             lines.append(
                 f'  id={block.block_id} '
                 f'f=[{block.f_start},{block.f_end}) h=[{block.h_start},{block.h_end}) '
                 f'w=[{block.w_start},{block.w_end}) '
                 f'size=({block.f_size},{block.h_size},{block.w_size}) '
-                f'tokens={block.token_count} curvature={curv:.6e}{tau_str}'
+                f'tokens={block.token_count} curvature={curv:.6e}{value_str}'
             )
         return '\n'.join(lines) + '\n'
 
@@ -132,6 +137,7 @@ class PartitionVisualizer:
         step_idx: int,
         save_path: str,
         max_frames: int,
+        block_value_label: str = 'tau',
     ) -> List[int]:
         del block_curvatures
         ft, _, _ = curvature_map.shape
@@ -160,7 +166,10 @@ class PartitionVisualizer:
             ax = axes[row, 0]
             frame = curvature_map[frame_idx].cpu().numpy()
             im = ax.imshow(frame, cmap='turbo', origin='upper', aspect='auto')
-            ax.set_title(f'Step {step_idx:04d} frame {frame_idx:03d} (curvature + tau overlay)')
+            ax.set_title(
+                f'Step {step_idx:04d} frame {frame_idx:03d} '
+                f'(curvature + {block_value_label} overlay)'
+            )
             ax.set_xlabel('W token')
             ax.set_ylabel('H token')
 
@@ -187,7 +196,7 @@ class PartitionVisualizer:
                 cy = block.h_start + block.h_size / 2.0
                 label = f'{block.f_size}x{block.h_size}x{block.w_size}'
                 if block_intervals is not None:
-                    label = f'tau={int(block_intervals.get(block.block_id, 1))}'
+                    label = f'{block_value_label}={int(block_intervals.get(block.block_id, 1))}'
                 ax.text(
                     cx,
                     cy,
@@ -204,7 +213,7 @@ class PartitionVisualizer:
 
             if tau_mappable is not None and row == 0:
                 tau_cbar = fig.colorbar(tau_mappable, ax=ax, fraction=0.018, pad=0.09)
-                tau_cbar.set_label('update interval tau')
+                tau_cbar.set_label(block_value_label)
 
         fig.tight_layout()
         fig.savefig(save_path)
@@ -243,6 +252,7 @@ class CubicVisualizer:
         output_dir: str,
         max_frames: int = 8,
         file_suffix: str | None = None,
+        block_value_label: str = 'tau',
     ) -> Dict[str, str]:
         return self.partition_visualizer.visualize_and_export(
             partition=partition,
@@ -253,6 +263,7 @@ class CubicVisualizer:
             max_frames=max_frames,
             block_intervals=block_intervals,
             file_suffix=file_suffix,
+            block_value_label=block_value_label,
         )
 
     def export_curvature_history(

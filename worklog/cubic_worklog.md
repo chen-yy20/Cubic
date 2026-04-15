@@ -1,4 +1,279 @@
+# 2026-04-15（flux2k partition 可视化改为显示 cooldown c）
+- 日期：2026-04-15
+- 目标模块：`flexflow/visualizer.py`、`flux2k_exp/flux2k_cubic/pipeline.py`
+- 变更摘要：
+  - 扩展 `CubicVisualizer/PartitionVisualizer` 接口，新增 `block_value_label`（默认 `tau`）。
+  - summary 导出支持按标签输出统计：
+    - 例如 `c_stats=...`；
+    - `block_detail` 中按 `c=...` 展示每个 partition 的分配值。
+  - frame strip 覆盖文字与色条标题由固定 `tau` 改为动态标签（flux2k下为 `c`）。
+  - flux2k pipeline 可视化调用改为传入真实 `cooldown_by_block`，并设置 `block_value_label='c'`。
+- 触达文件：
+  - `flexflow/visualizer.py`
+  - `flux2k_exp/flux2k_cubic/pipeline.py`
+  - `worklog/cubic_worklog.md`
+
+# 2026-04-15（flux2k optimizer增强：显式分配cooldown=0桶）
+- 日期：2026-04-15
+- 目标模块：`flux2k_exp/flux2k_cubic/optimizer.py`
+- 变更摘要：
+  - 针对“只出现 cooldown=1/2、0难以分配”的问题，调整 cooldown 分配策略：
+    - 从“按绝对曲率缩放到整数”改为“按曲率排序分桶（rank bucketization）”；
+    - 低曲率块优先落入 `cooldown=0` 桶，高曲率块分配到更大的 cooldown。
+  - 增加保障：当 block 数>=2 且未出现 `cooldown=0` 时，强制将最小曲率块置为 0。
+  - 目标是在短步数（尤其4步推理）中最大化相对性能收益，显式利用 `00/01/11` 三档。
+- 触达文件：
+  - `flux2k_exp/flux2k_cubic/optimizer.py`
+  - `worklog/cubic_worklog.md`
+- 验证命令：
+  - `source ./.venv/bin/activate`
+  - `python launch.py --model flux2k --method cubic`
+- 验证结果：
+  - 日志确认出现 `cooldown=[0,2]`；
+  - selective 两步均生效，step2/step3 均保持显著低于anchor步的耗时。
+
+# 2026-04-15（flux2k optimizer语义修正：每partition仅决定cooldown）
+- 日期：2026-04-15
+- 目标模块：`flux2k_exp/flux2k_cubic/optimizer.py`、`flux2k_exp/flux2k_cubic/pipeline.py`
+- 变更摘要：
+  - 按用户澄清，将 flux2k optimizer 从“策略标签+全局cooldown阶段”改为“token视角的 per-partition cooldown 分配”。
+  - 新语义：
+    - selective 总步数 `S = num_steps - anchor_steps`；
+    - 每个 block 分配 `c_b ∈ [0, S]`；
+    - 调度规则：冻结前 `S-c_b` 步，仅在最后 `c_b` 步 active。
+  - 当 `S=2` 时自然对应 `00/01/11` 三种模式（由 `c_b=0/1/2` 决定）。
+  - pipeline 侧移除旧的全局cooldown阶段分支，统一在 selective 阶段按 `cooldown_by_block` 构建 `StepPlan`。
+  - 可视化复用接口保留：将 `cooldown_by_block` 映射为近似 interval 仅用于展示，不改变真实调度。
+- 触达文件：
+  - `flux2k_exp/flux2k_cubic/optimizer.py`
+  - `flux2k_exp/flux2k_cubic/pipeline.py`
+  - `worklog/cubic_worklog.md`
+- 验证命令：
+  - `source ./.venv/bin/activate`
+  - `python launch.py --model flux2k --method cubic`
+- 验证结果：
+  - 运行通过；日志显示 `selective_steps=2` 且按 block cooldown 分配调度。
+  - 示例：step2 active_blocks 约为 4/16 或 8/16，step3 active_blocks 16/16，符合“最后 cooldown 步 active”的规则。
+
+# 2026-04-15（flux2k cubic：修复step2未加速，selective索引从1开始）
+- 日期：2026-04-15
+- 目标模块：`flux2k_exp/flux2k_cubic/pipeline.py`
+- 变更摘要：
+  - 修复 selective 相位首步（step2）经常退化为全量计算的问题。
+  - 原因：`selective_step_idx` 从 0 开始时，`idx % tau == 0` 会使首个 selective 步大量 block 同时 active，导致 `full_compute=True`。
+  - 调整：将 selective 相位索引改为从 1 开始：
+    - `selective_step_idx = max(1, i - anchor_steps + 1)`
+  - 结果：step2 与 step3 均进入 selective 计算形态。
+- 触达文件：
+  - `flux2k_exp/flux2k_cubic/pipeline.py`
+  - `worklog/cubic_worklog.md`
+- 验证命令：
+  - `source ./.venv/bin/activate`
+  - `python launch.py --model flux2k --method cubic`
+- 验证结果：
+  - 日志显示 step2/step3 均为 `full_compute=False`；
+  - 计时上 step2 与 step3 均出现加速（例如 step2 ~65ms，step3 ~282ms，均低于anchor步）。
+
+# 2026-04-15（flux2k cubic：适配visualize开关）
+- 日期：2026-04-15
+- 目标模块：`flux2k_exp/cubic_generate.py`
+- 变更摘要：
+  - 新增参数 `--visualize_curvature`，用于显式控制 cubic 可视化导出。
+  - 开关关闭时：
+    - `run_straightness_sampling` 不传 `cubic_results_dir`（避免分区/频率可视化开销）。
+    - 不导出 `straightness_vis` 与 `straightness_summary.txt`。
+  - 开关开启时：保持原有可视化导出行为。
+  - 将 `visualize_curvature` 写入 params_metrics，便于复现实验配置。
+- 触达文件：
+  - `flux2k_exp/cubic_generate.py`
+  - `worklog/cubic_worklog.md`
+
+# 2026-04-15（flux2k ori：对齐多seed生成与warmup逻辑）
+- 日期：2026-04-15
+- 目标模块：`flux2k_exp/ori_generate.py`
+- 变更摘要：
+  - 为 flux2k ori 入口增加多seed生成流程，与 flux1 风格保持一致：
+    - 默认 `num_images=3`，seed 序列为 `[base_seed, base_seed+1, base_seed+2]`。
+  - 增加 warmup 预热流程：
+    - 默认 `warmup_runs=2`，在正式计时前执行两次预热采样。
+  - 正式阶段按每个 seed 输出单独图片：`..._seed{seed}.png`，避免覆盖。
+  - 参数落盘改为多图结构：`output_images/base_seed/seeds/num_images/warmup_runs`。
+- 计时策略：
+  - 保持原有计时口径不变：`load_pipeline`、`inference`、`save_image`。
+  - warmup 不包裹在 `get_timer("inference")` 中，不计入正式计时统计。
+- 触达文件：
+  - `flux2k_exp/ori_generate.py`
+  - `worklog/cubic_worklog.md`
+
+# 2026-04-15（flux2k：warmup两次后按3个seed生成3图，对齐flux1）
+- 日期：2026-04-15
+- 目标模块：`flux2k_exp/cubic_generate.py`、`flux2k_exp/flux2k_cubic/pipeline.py`
+- 变更摘要：
+  - 入口改为多seed生成：默认 `num_images=3`，基于 `base_seed` 生成 `[seed, seed+1, seed+2]`。
+  - 增加 warmup 流程：正式计时前执行 `warmup_runs=2` 次预热采样。
+  - 为保证计时精度，warmup 调用不记录 step 计时：在 `run_straightness_sampling` 增加 `enable_step_timing` 开关。
+  - 正式阶段按每个 seed 输出一张图：
+    - `..._seed42.png`
+    - `..._seed43.png`
+    - `..._seed44.png`
+  - 每个seed的straightness可视化与summary分目录保存到 `seed{seed}/`，避免覆盖。
+  - 质量评估逻辑适配多seed：按seed记录并汇总 `mean`（当 `--quality_eval` 启用时）。
+- 计时结果约束：
+  - 保持仅4类计时：`load_pipeline`、`inference`、`step_xxxx_total`、`save_image`。
+  - 验证中样本数符合预期：`inference`/`save_image`/`step_xxxx_total` 均为 3 次样本（仅正式3次生成）。
+- 触达文件：
+  - `flux2k_exp/cubic_generate.py`
+  - `flux2k_exp/flux2k_cubic/pipeline.py`
+  - `worklog/cubic_worklog.md`
+- 验证命令：
+  - `source ./.venv/bin/activate`
+  - `python launch.py --model flux2k --method cubic`
+- 验证结果：
+  - 运行通过；先warmup 2次，再生成seed42/43/44三张图；计时统计结构与样本数符合预期。
+
+# 2026-04-15（flux2k：计时项收敛，仅保留4类）
+- 日期：2026-04-15
+- 目标模块：`flux2k_exp/flux2k_cubic/pipeline.py`、`flux2k_exp/cubic_generate.py`
+- 变更摘要：
+  - 按要求收敛计时粒度，仅保留以下4类：
+    1) `load_pipeline`
+    2) `inference`
+    3) `step_xxxx_total`
+    4) `save_image`
+  - 移除 step 内所有细分子计时（build_plan/cond_forward/uncond_forward/unpack/anchor_monitor/partition_opt/visualize/straightness/scheduler_step）。
+  - 移除 `quality_eval` 的独立计时项，避免新增第5类计时。
+- 变更依据：
+  - 入口计时对齐 ori 的主阶段统计；
+  - 逐步统计只保留单一总耗时，便于快速对比各步开销。
+- 触达文件：
+  - `flux2k_exp/flux2k_cubic/pipeline.py`
+  - `flux2k_exp/cubic_generate.py`
+  - `worklog/cubic_worklog.md`
+
+# 2026-04-15（flux2k：Selective Forward 首版落地，cond/uncond 统一策略）
+- 日期：2026-04-15
+- 目标模块：`flux2k_exp/flux2k_cubic/cubic_selective_forward.py`、`flux2k_exp/flux2k_cubic/pipeline.py`
+- 变更摘要：
+  - 实现 Selective Forward 首版：
+    - 在 selective 步仅对 `StepPlan.active_token_indices` 对应 token 执行 transformer forward；
+    - 对 frozen token 复用上一步输出缓存（velocity cache 风格）；
+    - anchor/full 步自动刷新缓存。
+  - 明确本轮边界：先不引入 KV cache sparse attention，仅实现 token 级 selective 执行。
+  - 按要求统一 cond/uncond 路径策略：
+    - 两条路径在 selective 阶段使用同一个 `step_plan`；
+    - 两条路径都走 `Flux2KSelectiveForwardEngine.forward(...)`；
+    - 各自使用独立 cache key（`flux2k_cond` / `flux2k_uncond`）避免互相污染。
+- 变更依据：
+  - 对齐增量实现顺序：先打通 partition/optimizer，再落 selective forward。
+  - 与 `implement.md` 的 selective 调度意图一致，先完成 active/frozen token 执行分离，再进入 KV cache 细化。
+- 触达文件：
+  - `flux2k_exp/flux2k_cubic/cubic_selective_forward.py`
+  - `flux2k_exp/flux2k_cubic/pipeline.py`
+  - `worklog/cubic_worklog.md`
+- 验证命令：
+  - `source ./.venv/bin/activate`
+  - `python launch.py --model flux2k --method cubic`
+- 验证结果：
+  - 运行通过，日志显示 selective 计划生效（`step=3 active_tokens=512/4096 full_compute=False`）。
+  - cond/uncond 路径均已应用相同 selective 策略并成功完成全流程。
+
+# 2026-04-15（flux2k：先对接 partitioner/optimizer，再进入 selective 执行）
+- 日期：2026-04-15
+- 目标模块：`flux2k_exp/flux2k_cubic/pipeline.py`
+- 变更摘要：
+  - 在 `run_straightness_sampling` 中接入 `CurvatureMonitor`、`AdaptivePartitioner`、`UpdateFrequencyOptimizer`、`SelectiveStepScheduler`、`CubicVisualizer`。
+  - 采样阶段按“前两步 anchor、后两步 selective”执行：
+    - anchor 步进行 full forward + curvature 更新；
+    - 第二个 anchor 产出曲率图后立即执行 partition 与 tau 分配；
+    - selective 步生成 `StepPlan` 并输出 active/frozen token 统计。
+  - 本轮按“先打通调度链路”的目标，selective 步暂保持 full forward，不提前引入稀疏执行回归风险。
+- 变更依据：
+  - 对齐 `flexflow/docs/implement.md` 2.2、2.4、2.5：anchor 负责全量监测、统一分块、tau 优化分配。
+  - 对齐 `flexflow/docs/theory.md` 的曲率驱动调度思想：先稳定建立 curvature->partition->frequency 映射，再下沉 selective 计算与缓存复用。
+- 触达文件：
+  - `flux2k_exp/flux2k_cubic/pipeline.py`
+  - `flux2k_exp/cubic_generate.py`
+  - `worklog/cubic_worklog.md`
+- 验证命令：
+  - `source ./.venv/bin/activate`
+  - `python launch.py --model flux2k --method cubic`
+- 验证结果：
+  - 运行通过；日志中可见：
+    - `Cubic anchor plan: step=1 blocks=16 speedup=1.959 tau=[1,4]`
+    - `Cubic selective plan: step=2 ... full_compute=True`
+    - `Cubic selective plan: step=3 active_tokens=512/4096 full_compute=False`
+  - 图像、straightness 可视化与 summary 均正常导出。
+
+# 2026-04-15 flux2k cubic anchor/selective分段与selective forward主流程
+
+## 目标
+实现flux2k cubic推理流程的anchor/selective分段，前两步anchor（全量forward+monitor），后两步selective（仅active token forward，frozen token复用缓存），并完成主流程可跑通。
+
+## 主要变更
+- 新增 flux2k_exp/flux2k_cubic/cubic_selective_forward.py，参考flux1 cubic selective forward实现，支持KV cache与active token selective forward。
+- pipeline.py中引入cubic_selective_engine，并在run_straightness_sampling中实现anchor/selective分段，selective步调用engine.forward。
+- selective步暂用“前一半token为active”策略，后续可接入partition/step_plan。
+
+## 验证
+- 运行 `source ./.venv/bin/activate && python launch.py --model flux2k --method cubic`，anchor步与selective步均可跑通，输出straightness记录、图片与可视化。
+- selective步未报错，主流程通过。
+- 期间遇到一次CUDA OOM，重试后正常。
+
+## 后续建议
+- 进一步完善step_plan与partition集成，实现真正的blockwise selective。
+- 支持frozen token velocity cache复用。
+- 完善与flexflow/partition、optimizer等模块的对接。
 # Cubic 工作日志
+
+## 2026-04-15（flux2k 入口重构：cubic 逻辑迁移到 flux2k_cubic 模块）
+- 目标模块：
+  - `flux2k_exp/flux2k_cubic/pipeline.py`
+  - `flux2k_exp/flux2k_cubic/__init__.py`
+  - `flux2k_exp/cubic_generate.py`
+- 变更摘要：
+  - 将 flux2k cubic 的核心执行逻辑从入口脚本迁移到 `flux2k_cubic` 模块：
+    - `load_pipeline(...)`
+    - `run_straightness_sampling(...)`
+    - `save_straightness_summary(...)`
+    - `resolve_output_paths(...)`
+  - `flux2k_exp/cubic_generate.py` 现在仅保留参数解析、初始化、调用模块、结果保存，角色与 `ori_generate.py` 对齐。
+  - 修复迁移时引入的函数名回归（`_resolve_output_paths` -> `resolve_output_paths`）。
+- 变更依据：
+  - 对齐 `flexflow/docs/implement.md` 的解耦入口原则（通过新增/独立模块接入 cubic，避免在入口脚本堆积实现细节）。
+  - 保持 origin runtime 不变，符合“入口脚本负责启动、实现放在模块中”的结构约束。
+- 受影响文件：
+  - `flux2k_exp/flux2k_cubic/pipeline.py`（新增）
+  - `flux2k_exp/flux2k_cubic/__init__.py`（新增）
+  - `flux2k_exp/cubic_generate.py`
+  - `worklog/cubic_worklog.md`
+- 验证命令与结果：
+  - 命令：`source ./.venv/bin/activate && python launch.py --model flux2k --method cubic`
+  - 结果：通过。4 步采样与 straightness 可视化正常，产物路径保持不变。
+
+## 2026-04-15（flux2-klein：4步 straightness 可视化接入）
+- 目标模块：
+  - `flux2k_exp/cubic_generate.py`
+  - `launch.py`
+- 变更摘要：
+  - 新增 `flux2k_exp/cubic_generate.py` 的 cubic 入口实现，保持 origin runtime 不改动，独立执行 flux2-klein 采样并接入 straightness 评估链路。
+  - 在 4 步去噪循环中按 theory 的 endpoint drift 关系记录 straightness 指标，导出：
+    - `straightness_vis/` 可视化图（含 overview 与热力图）
+    - `straightness_summary.txt`（每步 `mean_ratio/corr` 摘要）
+  - 在 `launch.py` 为 `flux2k` 增加 `cubic` 路由，支持统一命令：`python launch.py --model flux2k --method cubic`。
+  - 修复首轮运行中的显存累积问题：为 cubic 入口补充 `torch.inference_mode()`，避免推理图构建导致 OOM。
+- 变更依据：
+  - 对齐 `flexflow/docs/theory.md` §4：使用终点预测漂移与局部曲率比例关系进行 straightness 观测。
+  - 对齐 `flexflow/docs/implement.md` 3.2（解耦入口）与“保留 origin runtime”原则：通过新增入口模块并行接入，不改 `flux2k_exp/flux2_klein/` 原始推理实现。
+- 受影响文件：
+  - `flux2k_exp/cubic_generate.py`
+  - `launch.py`
+  - `worklog/cubic_worklog.md`
+- 验证命令与结果：
+  - 命令：`source ./.venv/bin/activate && python launch.py --model flux2k --method cubic`
+  - 结果：通过。4 步采样执行完成，控制台输出 3 条 straightness 记录（step1-3），并成功写出：
+    - `results/flux2/flux2-klein/cubic/cat_holding_sign_that/straightness_vis/`
+    - `results/flux2/flux2-klein/cubic/cat_holding_sign_that/straightness_summary.txt`
+    - `results/flux2/flux2-klein/cubic/cat_holding_sign_that/cubic_params_metrics.json`
 
 ## 2026-04-15（flux selective attention 修正：encoder 全量保留，仅 image 做 selection+KV cache）
 - 目标模块：
@@ -781,3 +1056,47 @@
 - 验证命令与结果：
   - 命令：`source ./.venv/bin/activate && python launch.py --model wan --method cubic`
   - 结果：会话上下文已有最近一次成功运行记录（Exit Code: 0），本次为文档改动，未引入运行逻辑变更。
+
+## 2026-04-15（flux2k selective attention：双 processor 的 RoPE 后 KV cache 更新与补全）
+- 日期：2026-04-15
+- 目标模块：`flux2k_exp/flux2k_cubic/attn.py`
+- 变更摘要：
+  - 在 `attn.py` 中新增两类 selective attention processor：
+    - `Flux2CubicKVCacheAttnProcessor`：用于 `Flux2AttnProcessor` 对应的双流注意力，保持 `encoder_hidden_states` 全量，仅对 image token 的 K/V 进行缓存更新与补全。
+    - `Flux2CubicKVCacheParallelSelfAttnProcessor`：用于 `Flux2ParallelSelfAttnProcessor` 对应的单流并行注意力，在无显式 encoder 输入的场景下，对整段序列执行 frozen K/V 补全。
+  - 严格按要求把 KV 更新/拼接放在 `apply_rotary_emb(...)` 之后，且尽量不改动原 attention 主流程（QKV 投影、norm、dispatch、输出投影保持一致）。
+  - 增加 `_call_cache_update(...)` 作为最小适配层，兼容 `_update_and_get_full_kv_cache` / `_update_and_get_kv_cache` / `_update_and_get_image_kv_cache` 不同缓存接口命名。
+- 变更依据：
+  - 对齐 `flexflow/docs/implement.md` 2.6：cruise selective 阶段应通过 per-layer KV cache 让 frozen token 参与 K/V 端，而 active token 正常计算。
+  - 对齐 `flexflow/docs/theory.md` §5 的 ZOH 复用思想：冻结区域通过缓存维持一致上下文，减少重复计算。
+- 触达文件：
+  - `flux2k_exp/flux2k_cubic/attn.py`
+  - `worklog/cubic_worklog.md`
+- 验证命令：
+  - `source ./.venv/bin/activate`
+  - `python launch.py --model flux2k --method cubic`
+- 验证结果：
+  - 命令执行通过（Exit Code 0）。
+  - 流程完成 warmup + 3 seed 生成，计时统计正常输出（`load_pipeline`/`inference`/`step_xxxx_total`/`save_image`）。
+
+## 2026-04-15（flux2k selective+kv 回退修复：按层区分 KV cache 长度校验）
+- 日期：2026-04-15
+- 目标模块：`flux2k_exp/flux2k_cubic/cubic_selective_forward.py`
+- 变更摘要：
+  - 修复 `use_kv_cache=True` 时 selective 步被误判为“KV 缓存不完整”并回退 full forward 的问题。
+  - 将 `_has_kv_cache_for_all_layers(...)` 的长度校验从单一 `total_tokens` 改为按层类型分别校验：
+    - `joint` 层期望长度为 `image_tokens`；
+    - `single` 层期望长度为 `encoder_tokens + image_tokens`。
+  - 在 selective 分支调用校验函数时显式传入 `image_tokens` 与 `encoder_tokens`，确保与 processor 实际缓存布局一致。
+- 变更依据：
+  - 对齐 `flexflow/docs/implement.md` 2.6：selective+KV 路径中 single/joint 层可拥有不同的有效序列长度语义，不应使用单一长度阈值统一判定。
+- 触达文件：
+  - `flux2k_exp/flux2k_cubic/cubic_selective_forward.py`
+  - `worklog/cubic_worklog.md`
+- 验证命令：
+  - `source ./.venv/bin/activate`
+  - `python launch.py --model flux2k --method cubic -- --use_kv_cache`
+- 验证结果：
+  - 运行通过（Exit Code 0）。
+  - selective+kv 生效：step2/step3 仍为 `full_compute=False`；且日志显示 `query` 为活跃子序列（如 2048/3328），`key/value` 为补全后全序列（4608），符合“selective forward + frozen KV cache”的预期。
+  - 输出目录后缀生效：结果写入 `results/flux2/flux2-klein/cubic_kv/...`。

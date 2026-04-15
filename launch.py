@@ -20,6 +20,7 @@ SCRIPT_MAP = {
     },
     "flux2k": {
         "ori": "flux2k_exp/ori_generate.py",
+        "cubic": "flux2k_exp/cubic_generate.py",
     }
 }
 
