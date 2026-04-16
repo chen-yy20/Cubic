@@ -1,0 +1,4 @@
+interface:
+  display_name: "Cubic Repo Conventions"
+  short_description: "Orient quickly in this cubic experiment repo"
+  default_prompt: "Use $cubic-repo-conventions to orient yourself before changing code in this repository."

@@ -1,0 +1,4 @@
+interface:
+  display_name: "ImplementMD Drift Reviewer"
+  short_description: "Review code drift against implement.md"
+  default_prompt: "Use $implementmd-drift-reviewer to review whether current code still matches flexflow/docs/implement.md."
