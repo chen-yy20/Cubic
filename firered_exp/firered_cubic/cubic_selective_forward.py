@@ -27,11 +27,6 @@ class FireRedSelectiveForwardEngine:
     def reset(self) -> None:
         self.output_cache.clear()
 
-    @staticmethod
-    def _is_cond_active_in_selective(step_phase: str | None) -> bool:
-        # Default policy: cond KV is frozen in cruise-selective steps and refreshed on anchor/full.
-        return False
-
     def forward(
         self,
         transformer,
@@ -146,11 +141,7 @@ class FireRedSelectiveForwardEngine:
                 )
             condition_idx = cond_local_idx + main_token_count
         else:
-            cond_active_in_selective = self._is_cond_active_in_selective(step_phase)
-            if cond_active_in_selective:
-                condition_idx = torch.arange(main_token_count, seq_len, device=hidden_states.device, dtype=torch.long)
-            else:
-                condition_idx = torch.empty(0, device=hidden_states.device, dtype=torch.long)
+            condition_idx = torch.empty(0, device=hidden_states.device, dtype=torch.long)
 
         selected_idx = torch.unique(torch.cat([active_main_idx, condition_idx], dim=0), sorted=True)
 

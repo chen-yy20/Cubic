@@ -11,6 +11,7 @@ from PIL import Image
 from firered_cubic.pipeline import CubicQwenImageEditPlusPipeline
 from firered_cubic.transformer import CubicQwenImageTransformer2DModel
 
+from utils.quality_metric import evaluate_quality_with_origin
 from utils.results import get_prompt_id, save_params_and_metrics
 from utils.timer import get_time_statistics_dict, get_timer, init_timer, print_time_statistics
 
@@ -25,7 +26,8 @@ WARMUP_FRACTION = 0.1
 COOLDOWN_FRACTION = 0.1
 ANCHOR_INTERVAL = 8
 
-visualize_curvature = True  # 是否启用曲率可视化（会增加额外计算开销）
+visualize_curvature = False  # 是否启用曲率可视化（会增加额外计算开销）
+quality_eval = True
 
 
 def _init_logging() -> None:
@@ -53,6 +55,7 @@ def parse_args() -> argparse.Namespace:
     parser.add_argument("--cubic_cooldown_fraction", type=float, default=COOLDOWN_FRACTION)
     parser.add_argument("--cubic_anchor_interval", type=int, default=ANCHOR_INTERVAL)
     parser.add_argument("--disable_visualization", action="store_true", default=not visualize_curvature, help="Disable cubic curvature visualization export")
+    parser.add_argument("--disable_quality_eval", action="store_true", default=not quality_eval, help="Disable quality evaluation against origin baseline")
     return parser.parse_args()
 
 
@@ -148,6 +151,17 @@ def main() -> None:
     with get_timer("save_image"):
         output_image.save(output_image_path)
 
+    quality_metrics = None
+    if not args.disable_quality_eval:
+        quality_result = evaluate_quality_with_origin(
+            image_path=str(output_image_path),
+            tag=TAG,
+            save_metrics=False,
+            baseline_path=None,
+            output_dir=str(output_dir),
+        )
+        quality_metrics = quality_result["metrics"] if quality_result is not None else None
+
     print("Image saved at:", output_image_path.resolve())
     print_time_statistics()
 
@@ -168,13 +182,14 @@ def main() -> None:
         "cooldown_fraction": args.cubic_cooldown_fraction,
         "anchor_interval": args.cubic_anchor_interval,
         "visualization_enabled": not args.disable_visualization,
+        "quality_eval": not args.disable_quality_eval,
     }
     params_path = save_params_and_metrics(
         str(output_dir),
         TAG,
         params,
         get_time_statistics_dict(),
-        quality_metrics=None,
+        quality_metrics=quality_metrics,
     )
     print(f"Params & metrics saved to {params_path}", flush=True)
 
