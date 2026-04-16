@@ -7,6 +7,7 @@ from flux2k_cubic import (
 	TAG,
 	load_pipeline,
 	resolve_output_paths,
+	run_selective_attention_comparison,
 	run_straightness_sampling,
 	save_straightness_summary,
 )
@@ -21,7 +22,7 @@ WARMUP_RUNS = 2
 
 visualize_curvature = False  # 是否启用曲率可视化（会增加额外计算开销）
 eval_quality = True
-use_kv_cache = True  # 是否启用KV缓存（如果模型和pipeline支持的话）
+compare_attention_scenarios = False # 是否比较KV Cache引入的误差
 
 
 def parse_args() -> argparse.Namespace:
@@ -57,10 +58,10 @@ def parse_args() -> argparse.Namespace:
 		help="Enable cubic visualization export (partition/straightness)",
 	)
 	parser.add_argument(
-		"--use_kv_cache",
+		"--compare_attention_scenarios",
 		action=argparse.BooleanOptionalAction,
-		default=use_kv_cache,
-		help="Enable selective attention with KV cache (true) or pure selective (false)",
+		default=compare_attention_scenarios,
+		help="Compare baseline/full attention outputs against selective no-kv and stale-kv scenarios",
 	)
 	return parser.parse_args()
 
@@ -68,7 +69,7 @@ def parse_args() -> argparse.Namespace:
 def main() -> None:
 	args = parse_args()
 	dtype = torch.bfloat16
-	mode_suffix = "kv" if bool(args.use_kv_cache) else ""
+	mode_suffix = "attention_compare" if bool(args.compare_attention_scenarios) else "selective"
 	output_dir, output_image_path, model_id = resolve_output_paths(
 		args.model_path, args.prompt, args.output_dir, args.output_image, mode_suffix=mode_suffix
 	)
@@ -85,10 +86,27 @@ def main() -> None:
 		f"height={args.height}, width={args.width}, steps={args.num_inference_steps}, "
 		f"guidance_scale={args.guidance_scale}, base_seed={args.seed}, "
 		f"num_images={len(seeds)}, warmup_runs={args.warmup_runs}, "
-		f"visualize_curvature={bool(args.visualize_curvature)}, use_kv_cache={bool(args.use_kv_cache)}, "
+		f"visualize_curvature={bool(args.visualize_curvature)}, "
+		f"compare_attention_scenarios={bool(args.compare_attention_scenarios)}, "
 		f"output_mode={mode_suffix}, generator_device={generator_device}",
 		flush=True,
 	)
+
+	if args.compare_attention_scenarios:
+		comparison_generator = torch.Generator(device=generator_device).manual_seed(args.seed)
+		comparison_path = run_selective_attention_comparison(
+			pipe=pipe,
+			prompt=args.prompt,
+			height=args.height,
+			width=args.width,
+			guidance_scale=args.guidance_scale,
+			num_inference_steps=args.num_inference_steps,
+			generator=comparison_generator,
+			max_sequence_length=args.max_sequence_length,
+			output_dir=output_dir,
+		)
+		print(f"Attention comparison written to {comparison_path}", flush=True)
+		return
 
 	# Warmup不计时：用于稳定首次运行开销，避免污染计时统计。
 	for warmup_idx in range(max(0, int(args.warmup_runs))):
@@ -105,7 +123,6 @@ def main() -> None:
 				max_sequence_length=args.max_sequence_length,
 				cubic_results_dir=None,
 				enable_step_timing=False,
-					use_kv_cache=bool(args.use_kv_cache),
 			)
 	print(f"Warmup done: runs={max(0, int(args.warmup_runs))}", flush=True)
 
@@ -129,7 +146,6 @@ def main() -> None:
 					max_sequence_length=args.max_sequence_length,
 					cubic_results_dir=seed_output_dir if args.visualize_curvature else None,
 					enable_step_timing=True,
-					use_kv_cache=bool(args.use_kv_cache),
 				)
 
 		seed_image_path = output_image_path.with_name(f"{TAG}_{output_image_path.stem.replace(f'{TAG}_', '')}_seed{seed}.png")
@@ -195,7 +211,6 @@ def main() -> None:
 		"straightness_records": len(straightness.records),
 		"quality_eval": bool(args.quality_eval),
 		"visualize_curvature": bool(args.visualize_curvature),
-		"use_kv_cache": bool(args.use_kv_cache),
 		"output_mode": mode_suffix,
 	}
 	params_path = save_params_and_metrics(

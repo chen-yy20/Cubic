@@ -273,7 +273,6 @@ class Flux2ParallelSelfAttnProcessor:
         attention_mask: torch.Tensor | None = None,
         image_rotary_emb: torch.Tensor | None = None,
     ) -> torch.Tensor:
-        print(f"single_attn: {hidden_states.shape=}, {image_rotary_emb[0].shape=}, {image_rotary_emb[1].shape=}", flush=True)
         # Parallel in (QKV + MLP in) projection
         hidden_states = attn.to_qkv_mlp_proj(hidden_states)
         qkv, mlp_hidden_states = torch.split(
@@ -447,6 +446,7 @@ class Flux2SingleTransformerBlock(nn.Module):
         norm_hidden_states = (1 + mod_scale) * norm_hidden_states + mod_shift
 
         joint_attention_kwargs = joint_attention_kwargs or {}
+
         attn_output = self.attn(
             hidden_states=norm_hidden_states,
             image_rotary_emb=image_rotary_emb,
@@ -722,11 +722,6 @@ class Flux2Transformer2DModel(
         guidance_embeds: bool = True,
     ):
         super().__init__()
-        print(
-            "Initializing Flux2Transformer2DModel "
-            f"(patch_size={patch_size}, in_channels={in_channels}, num_layers={num_layers}, num_single_layers={num_single_layers})",
-            flush=True,
-        )
         self.out_channels = out_channels or in_channels
         self.inner_dim = num_attention_heads * attention_head_dim
 

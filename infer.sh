@@ -27,4 +27,14 @@ export WORLD_SIZE=${WORLD_SIZE:-$((NNODES * GPUS_PER_NODE))}
 
 export CUDA_DEVICE_MAX_CONNECTIONS=1
 
-exec python "$SCRIPT" "$@"
+PYTHON_BIN=${PYTHON_BIN:-$(command -v python || true)}
+if [ -z "$PYTHON_BIN" ]; then
+    PYTHON_BIN=$(command -v python3 || true)
+fi
+
+if [ -z "$PYTHON_BIN" ]; then
+    echo "Neither python nor python3 was found on PATH"
+    exit 127
+fi
+
+exec "$PYTHON_BIN" "$SCRIPT" "$@"

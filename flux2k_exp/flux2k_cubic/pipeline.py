@@ -78,7 +78,6 @@ def run_straightness_sampling(
     max_sequence_length: int,
     cubic_results_dir: Path | None = None,
     enable_step_timing: bool = True,
-    use_kv_cache: bool = False,
 ) -> tuple[object, StraightnessEvaluator]:
     with torch.inference_mode():
         # flux2k专用优化：
@@ -158,7 +157,6 @@ def run_straightness_sampling(
         straightness = StraightnessEvaluator(straightness_cfg)
 
         monitor.reset()
-        cubic_selective_engine.set_use_kv_cache(bool(use_kv_cache))
         cubic_selective_engine.reset()
 
         # 前两步anchor（full），后两步selective（按step_plan selective执行）
@@ -170,6 +168,7 @@ def run_straightness_sampling(
                 with step_timer_ctx:
                     timestep = t.expand(latents.shape[0]).to(latents.dtype)
                     phase = Phase.CRUISE_ANCHOR if i < anchor_steps else Phase.CRUISE_SELECTIVE
+                    phase_label = phase.name.lower().replace("cruise_", "")
                     step_plan = None
 
                     if phase == Phase.CRUISE_SELECTIVE and current_partition is not None and current_policy_plan is not None:
@@ -180,6 +179,12 @@ def run_straightness_sampling(
                         )
                         if step_plan is None:
                             phase = Phase.COOLDOWN
+                            phase_label = phase.name.lower()
+
+                    print(
+                        f"[cubic][step={i:02d}][{phase_label}] begin t={float(t.detach().reshape(-1)[0].item()):.6f}",
+                        flush=True,
+                    )
 
                     with pipe.transformer.cache_context("cond"):
                         noise_pred = cubic_selective_engine.forward(
@@ -194,6 +199,9 @@ def run_straightness_sampling(
                             joint_attention_kwargs=None,
                             step_plan=step_plan,
                             cache_key="flux2k_cond",
+                            step_idx=i,
+                            step_phase=phase_label,
+                            trace_label="cond",
                         )
 
                     if negative_prompt_embeds is not None and negative_text_ids is not None:
@@ -210,6 +218,9 @@ def run_straightness_sampling(
                                 joint_attention_kwargs=None,
                                 step_plan=step_plan,
                                 cache_key="flux2k_uncond",
+                                step_idx=i,
+                                step_phase=phase_label,
+                                trace_label="uncond",
                             )
                         noise_pred = neg_noise_pred + guidance_scale * (noise_pred - neg_noise_pred)
 
@@ -250,8 +261,8 @@ def run_straightness_sampling(
                                 cd_min = cd_max = 0
                                 cd_mean = 0.0
                             print(
-                                "Cubic anchor plan: "
-                                f"step={i} blocks={len(current_partition.blocks)} "
+                                f"[cubic][step={i:02d}][anchor] plan "
+                                f"blocks={len(current_partition.blocks)} "
                                 f"selective_steps={current_policy_plan.selective_steps} "
                                 f"cooldown=[{cd_min},{cd_max}] mean={cd_mean:.2f}",
                                 flush=True,
@@ -271,8 +282,8 @@ def run_straightness_sampling(
                         total_block_count = len(current_partition.blocks)
                         active_block_count = len(step_plan.active_block_ids)
                         print(
-                            "Cubic selective plan: "
-                            f"step={i} active_blocks={active_block_count}/{total_block_count} "
+                            f"[cubic][step={i:02d}][{phase_label}] plan "
+                            f"active_blocks={active_block_count}/{total_block_count} "
                             f"active_tokens={int(step_plan.active_token_indices.numel())}/{current_partition.total_tokens} "
                             f"full_compute={step_plan.is_full_compute}",
                             flush=True,
@@ -286,8 +297,8 @@ def run_straightness_sampling(
                     )
                     if record is not None:
                         print(
-                            "Straightness record: "
-                            f"step={record.step} t={record.t:.4f} mean_ratio={record.mean_ratio:.6f} corr={record.corr:.6f}",
+                            f"[cubic][step={int(record.step):02d}][straightness] "
+                            f"t={record.t:.4f} mean_ratio={record.mean_ratio:.6f} corr={record.corr:.6f}",
                             flush=True,
                         )
 

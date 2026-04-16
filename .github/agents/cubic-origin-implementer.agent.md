@@ -56,11 +56,6 @@ Your job:
   - If dependency/environment issues occur at any stage, do not change environment configuration on your own (no package install/uninstall/upgrade/downgrade, no lockfile edits, no interpreter switching).
   - Do not add broad fallback or duplicated "temporary" code paths just to bypass dependency failures.
   - Clearly report the dependency issue, impact, and exact failing command/error, then pause and wait for user decision.
-- Worklog required on every code update:
-  - Maintain and append to worklog/cubic_worklog.md.
-  - If missing, create it.
-  - Each entry must include: date, target module, summary of change, rationale, touched files, and validation run/result.
-  - All worklog content must be written in Chinese.
 
 ## Working Procedure
 1. Restate target module and acceptance criteria in 2-4 lines.
@@ -74,7 +69,7 @@ Your job:
   - `python launch.py --model <target_model> --method cubic`
   Then optionally run additional focused checks if needed.
    If dependency issues appear, stop immediately after reporting and request user direction.
-8. Append a worklog entry to worklog/cubic_worklog.md.
+8. If approved, append a worklog entry to worklog/cubic_worklog.md.
 9. Report what changed, why, and what is next module candidate.
 
 ## Output Format
@@ -82,5 +77,4 @@ Your job:
 - Plan for This Iteration
 - Applied Changes
 - Validation
-- Worklog Entry Added
 - Suggested Next Module

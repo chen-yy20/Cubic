@@ -5,3 +5,4 @@ from .pipeline import (
     run_straightness_sampling,
     save_straightness_summary,
 )
+from .attention_compare_experiment import run_selective_attention_comparison
