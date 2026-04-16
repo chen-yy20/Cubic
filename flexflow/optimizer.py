@@ -37,6 +37,9 @@ class UpdateFrequencyOptimizer:
         self.target_speedup = float(getattr(config, 'target_speedup', 2.0))
         # Optional contrast gain: >1 amplifies curvature differences before tau mapping.
         self.curvature_contrast_gamma = float(getattr(config, 'curvature_contrast_gamma', 1.0))
+        # Optional post-normalization span expansion to avoid all blocks collapsing to one tau bin.
+        self.tau_diversity_target_span = float(getattr(config, 'tau_diversity_target_span', 0.0))
+        self.tau_diversity_max_boost = float(getattr(config, 'tau_diversity_max_boost', 1.0))
         self.eps = 1e-8
 
     def optimize(self, partition, block_curvatures: Dict[int, float]) -> FrequencyPlan:
@@ -80,6 +83,11 @@ class UpdateFrequencyOptimizer:
         target = max(self.target_speedup, 1.0)
         scale = target * inv_raw_mean
         tau_cont = scale * raw_tau
+        tau_cont = self._maybe_boost_tau_diversity(tau_cont)
+
+        # Re-normalize after diversity boost so achieved speedup stays close to the target.
+        inv_tau_cont_mean = float(np.mean(1.0 / np.maximum(tau_cont, self.eps)))
+        tau_cont = tau_cont * (target * inv_tau_cont_mean)
 
         tau_discrete = np.rint(tau_cont)
         tau_discrete = np.clip(tau_discrete, self.tau_min, self.tau_max).astype(np.int32)
@@ -101,3 +109,19 @@ class UpdateFrequencyOptimizer:
             min_interval=int(np.min(tau_discrete).item()),
             max_interval=int(np.max(tau_discrete).item()),
         )
+
+    def _maybe_boost_tau_diversity(self, tau_cont: np.ndarray) -> np.ndarray:
+        target_span = max(float(self.tau_diversity_target_span), 0.0)
+        max_boost = max(float(self.tau_diversity_max_boost), 1.0)
+
+        if tau_cont.size < 2 or target_span <= 0.0:
+            return tau_cont
+
+        current_span = float(np.max(tau_cont) - np.min(tau_cont))
+        if current_span <= self.eps or current_span >= target_span:
+            return tau_cont
+
+        boost = min(max_boost, target_span / max(current_span, self.eps))
+        tau_mean = float(np.mean(tau_cont))
+        boosted = tau_mean + (tau_cont - tau_mean) * boost
+        return np.clip(boosted, self.tau_min, self.tau_max)

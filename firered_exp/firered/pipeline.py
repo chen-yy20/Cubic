@@ -804,39 +804,40 @@ class QwenImageEditPlusPipeline(DiffusionPipeline, QwenImageLoraLoaderMixin):
 
                 # broadcast to batch dimension in a way that's compatible with ONNX/Core ML
                 timestep = t.expand(latents.shape[0]).to(latents.dtype)
-                with self.transformer.cache_context("cond"):
-                    with get_timer("dit_fw"):
-                        noise_pred = self.transformer(
-                            hidden_states=latent_model_input,
-                            timestep=timestep / 1000,
-                            guidance=guidance,
-                            encoder_hidden_states_mask=prompt_embeds_mask,
-                            encoder_hidden_states=prompt_embeds,
-                            img_shapes=img_shapes,
-                            attention_kwargs=self.attention_kwargs,
-                            return_dict=False,
-                        )[0]
-                    noise_pred = noise_pred[:, : latents.size(1)]
-
-                if do_true_cfg:
-                    with self.transformer.cache_context("uncond"):
+                with get_timer("full_forward"):
+                    with self.transformer.cache_context("cond"):
                         with get_timer("dit_fw"):
-                            neg_noise_pred = self.transformer(
+                            noise_pred = self.transformer(
                                 hidden_states=latent_model_input,
                                 timestep=timestep / 1000,
                                 guidance=guidance,
-                                encoder_hidden_states_mask=negative_prompt_embeds_mask,
-                                encoder_hidden_states=negative_prompt_embeds,
+                                encoder_hidden_states_mask=prompt_embeds_mask,
+                                encoder_hidden_states=prompt_embeds,
                                 img_shapes=img_shapes,
                                 attention_kwargs=self.attention_kwargs,
                                 return_dict=False,
                             )[0]
-                    neg_noise_pred = neg_noise_pred[:, : latents.size(1)]
-                    comb_pred = neg_noise_pred + true_cfg_scale * (noise_pred - neg_noise_pred)
+                        noise_pred = noise_pred[:, : latents.size(1)]
 
-                    cond_norm = torch.norm(noise_pred, dim=-1, keepdim=True)
-                    noise_norm = torch.norm(comb_pred, dim=-1, keepdim=True)
-                    noise_pred = comb_pred * (cond_norm / noise_norm)
+                    if do_true_cfg:
+                        with self.transformer.cache_context("uncond"):
+                            with get_timer("dit_fw"):
+                                neg_noise_pred = self.transformer(
+                                    hidden_states=latent_model_input,
+                                    timestep=timestep / 1000,
+                                    guidance=guidance,
+                                    encoder_hidden_states_mask=negative_prompt_embeds_mask,
+                                    encoder_hidden_states=negative_prompt_embeds,
+                                    img_shapes=img_shapes,
+                                    attention_kwargs=self.attention_kwargs,
+                                    return_dict=False,
+                                )[0]
+                        neg_noise_pred = neg_noise_pred[:, : latents.size(1)]
+                        comb_pred = neg_noise_pred + true_cfg_scale * (noise_pred - neg_noise_pred)
+
+                        cond_norm = torch.norm(noise_pred, dim=-1, keepdim=True)
+                        noise_norm = torch.norm(comb_pred, dim=-1, keepdim=True)
+                        noise_pred = comb_pred * (cond_norm / noise_norm)
 
                 # compute the previous noisy sample x_t -> x_t-1
                 latents_dtype = latents.dtype
