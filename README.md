@@ -64,7 +64,10 @@ python launch.py --model <model> --method <method> [--launcher python|srun] [--g
 - `flux + ori` -> `flux1_exp/ori_generate.py`
 - `flux + cubic` -> `flux1_exp/cubic_generate.py`
 - `firered + ori` -> `firered_exp/ori_generate.py`
+- `firered + cubic` -> `firered_exp/cubic_generate.py`
+- `firered + kv_drift` -> `firered_exp/firered_cubic/cond_kv_drift_experiment.py`
 - `flux2k + ori` -> `flux2k_exp/ori_generate.py`
+- `flux2k + cubic` -> `flux2k_exp/cubic_generate.py`
 
 ### 2.1 启用 CFG Parallel（`--gpus 2`）
 
@@ -166,6 +169,48 @@ python launch.py --model flux --method cubic
 - 曲率与分块可视化导出（可开关）
 - 生成后质量评测（按 seed 评测并汇总 mean）
 
+### 4.3 FireRed cubic
+
+图像编辑模型。序列由噪声latent和参考图latent拼接而成。噪声latent遵循cubic理论做token selection，参考图latent则通过一次fft复杂度分析，直接判断区间重要性进行selection。
+
+基础命令：
+
+```bash
+source .venv/bin/activate
+python launch.py --model firered --method cubic --launcher python
+```
+
+当前 FireRed cubic 已接入：
+
+- 主图 token 与条件 token 双路调度（main/cond speedup 可分别设置）
+- anchor 步曲率监测与分块重规划
+- selective forward（未选中的 token 复用输出缓存）
+- 条件复杂度分块与可视化导出（可开关）
+
+### 4.4 Flux2-klein cubic
+
+4步推理蒸馏模型，亚秒级生成。Cubic仍然能作用，因为curvature的异构性仍然存在。只是KV Staleness已经没有了，因此不能实现kv cache，但生成效果依然可以接受。
+
+基础命令：
+
+```bash
+source .venv/bin/activate
+python launch.py --model flux2k --method cubic --launcher python
+```
+
+attention 场景对比（baseline / no-kv / stale-kv）示例：
+
+```bash
+python launch.py --model flux2k --method cubic --launcher python -- --compare_attention_scenarios
+```
+
+当前 Flux2-klein cubic 已接入：
+
+- 固定前两步 anchor，后续 selective 的特化流程
+- block 级 cooldown 策略（按曲率分桶）
+- selective forward（active token 重算 + frozen token 输出缓存复用）
+- 多 seed 生成与质量评测汇总
+
 ## 5. 输出文件位置与含义
 
 ### 5.1 WAN cubic 输出目录
@@ -248,7 +293,35 @@ results/flux/cubic/<prompt_id>_<speedup>x/
 - `partition_vis/step_XXXX_partition_summary_seed<seed>.txt`（开启可视化时）
 	- 含义：对应 anchor 步的分块统计与频率分配摘要。
 
-### 5.6 质量指标（WAN / Flux）说明
+### 5.6 FireRed cubic 输出目录
+
+```text
+results/firered/<model_id>/cubic/<prompt_id>_<speedup>x/
+```
+
+常见文件与含义：
+
+- `cubic_<prompt_id>_<model_id>.png`：编辑结果图。
+- `cubic_params_metrics.json`：参数、计时统计与质量指标（若开启评测）。
+- `partition_vis/*.png|*.txt`（开启可视化时）：主图/条件分块与频率摘要。
+- `curvature_vis/*.png`（开启可视化时）：主图曲率历史总览。
+
+### 5.7 Flux2-klein cubic 输出目录
+
+```text
+results/flux2/<model_id>/cubic_<mode>/<prompt_id>/
+```
+
+其中 `<mode>` 默认为 `selective`，开启 `--compare_attention_scenarios` 时为 `attention_compare`。
+
+常见文件与含义：
+
+- `cubic_<prompt_id>_<model_id>_seed<seed>.png`：每个 seed 的生成图。
+- `cubic_params_metrics.json`：参数、计时统计与质量评测汇总（`per_seed` + `mean`）。
+- `straightness_vis/*.png|*.txt`（开启可视化时）：straightness 与曲率诊断导出。
+- `cubic_attention_compare.json`（仅对比模式）：baseline/no-kv/stale-kv 对比结果。
+
+### 5.8 质量指标（WAN / Flux）说明
 
 WAN 与 Flux 路径都可调用质量评估并写入日志/JSON，常见指标：
 
