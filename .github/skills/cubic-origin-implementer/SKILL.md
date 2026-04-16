@@ -9,16 +9,16 @@ Use this skill when the user wants to add or extend cubic support for a model in
 
 ## Read first
 
-1. `flexflow/docs/theory.md`
-2. `flexflow/docs/implement.md`
+1. `cubic_core/docs/theory.md`
+2. `cubic_core/docs/implement.md`
 3. Relevant origin entry and runtime files for the target model
-4. `flexflow/reference/jano_*.py` and `flexflow/reference/wan_modules/*` only when needed as implementation patterns
+4. `cubic_core/reference/jano_*.py` and `cubic_core/reference/wan_modules/*` only when needed as implementation patterns
 
 ## Repo rules
 
 - Keep origin runtime modules untouched unless the user explicitly approves editing them.
 - Prefer new files under the model experiment directory such as `<model>_exp/cubic_generate.py` or `<model>_exp/<model>_cubic/*`.
-- If logic is model-agnostic, place it under `flexflow/`.
+- If logic is model-agnostic, place it under `cubic_core/`.
 - Make small, reviewable patches, usually one module at a time.
 - Do not install, upgrade, downgrade, or remove dependencies on your own.
 
@@ -35,7 +35,7 @@ Use this skill when the user wants to add or extend cubic support for a model in
 2. Read the theory and implement docs sections that govern the requested change.
 3. Map the origin path to the cubic path and choose placement:
    - model-specific derived code -> corresponding `*_exp/`
-   - model-agnostic reusable code -> `flexflow/`
+   - model-agnostic reusable code -> `cubic_core/`
 4. Implement the smallest viable patch for the requested module.
 5. Run a focused smoke validation when the environment allows it.
 6. If the change is WAN-related and the user wants progress tracking, use `cubic-worklog-maintainer`.

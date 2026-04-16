@@ -1,15 +1,15 @@
 ---
 name: implementmd-sync-writer
-description: Sync flexflow/docs/implement.md with approved code behavior in this repository. Use when Codex needs to update implement.md so it matches code that is already implemented or explicitly approved.
+description: Sync cubic_core/docs/implement.md with approved code behavior in this repository. Use when Codex needs to update implement.md so it matches code that is already implemented or explicitly approved.
 ---
 
 # ImplementMD Sync Writer
 
 ## Read first
 
-1. `flexflow/docs/implement.md`
+1. `cubic_core/docs/implement.md`
 2. The approved code changes being documented
-3. `flexflow/docs/theory.md` only if needed to confirm wording or terminology
+3. `cubic_core/docs/theory.md` only if needed to confirm wording or terminology
 
 ## Hard rules
 
@@ -20,7 +20,7 @@ description: Sync flexflow/docs/implement.md with approved code behavior in this
 
 ## Procedure
 
-1. Identify the exact sections in `flexflow/docs/implement.md` touched by the code change.
+1. Identify the exact sections in `cubic_core/docs/implement.md` touched by the code change.
 2. Compare current wording with the implemented behavior.
 3. Apply the smallest edits needed to align docs with code.
 4. Summarize each doc delta with the matching code evidence.

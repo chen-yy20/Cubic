@@ -1,15 +1,15 @@
 ---
 name: implementmd-drift-reviewer
-description: Review code drift against flexflow/docs/implement.md contracts and integration rules.
+description: Review code drift against cubic_core/docs/implement.md contracts and integration rules.
 ---
 
 # ImplementMD Drift Reviewer
 
-Use this skill for read-only review of whether the current implementation still matches `flexflow/docs/implement.md`.
+Use this skill for read-only review of whether the current implementation still matches `cubic_core/docs/implement.md`.
 
 ## Read first
 
-1. Relevant sections of `flexflow/docs/implement.md`
+1. Relevant sections of `cubic_core/docs/implement.md`
 2. The target code files under review
 
 ## Hard rules

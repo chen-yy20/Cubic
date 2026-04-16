@@ -9,8 +9,8 @@ description: Quick orientation for this repository's cubic experiment layout, la
 
 - `README.md`: environment setup, launcher usage, model mapping, output locations
 - `launch.py`: unified entrypoint routing `--model` and `--method`
-- `flexflow/docs/theory.md`: algorithm and terminology
-- `flexflow/docs/implement.md`: implementation architecture and contracts
+- `cubic_core/docs/theory.md`: algorithm and terminology
+- `cubic_core/docs/implement.md`: implementation architecture and contracts
 
 ## Repository layout
 
@@ -18,7 +18,7 @@ description: Quick orientation for this repository's cubic experiment layout, la
 - `flux1_exp/`: Flux1 origin and cubic experiments
 - `flux2k_exp/`: Flux2-klein origin and cubic work-in-progress
 - `firered_exp/`: FireRed origin experiments
-- `flexflow/`: model-agnostic cubic logic, docs, and references
+- `cubic_core/`: model-agnostic cubic logic, docs, and references
 - `utils/`: timers, metrics, logging, result helpers
 
 ## Default engineering expectations

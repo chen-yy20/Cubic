@@ -1,6 +1,6 @@
 """Curvature monitor for Cubic anchor steps.
 
-This module follows flexflow/docs/implement.md section 4.4:
+This module follows cubic_core/docs/implement.md section 4.4:
 - endpoint prediction update at anchor step
 - drift-based curvature estimation in latent space
 - pooling to token space with patch_size
@@ -150,7 +150,7 @@ class CurvatureMonitor:
                               save_raw: bool = False,
                               save_strip: bool = False,
                               save_meta: bool = False):
-        """Backward-compatible entry; visualization is centralized in flexflow.visualizer."""
+        """Backward-compatible entry; visualization is centralized in cubic_core.visualizer."""
         self.visualizer.export_curvature_history(
             curvature_history=self.curvature_history,
             output_dir=output_dir,

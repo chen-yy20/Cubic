@@ -1,4 +1,4 @@
 interface:
   display_name: "ImplementMD Sync Writer"
   short_description: "Sync implement.md to approved repo behavior"
-  default_prompt: "Use $implementmd-sync-writer to align flexflow/docs/implement.md with approved implemented behavior in this repository."
+  default_prompt: "Use $implementmd-sync-writer to align cubic_core/docs/implement.md with approved implemented behavior in this repository."

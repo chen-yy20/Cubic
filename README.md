@@ -305,12 +305,12 @@ python launch.py --model wan --method cubic --launcher python -- --straightness_
 
 ## 7. 参数与理论的对应关系
 
-根据 `flexflow/docs/implement.md`：
+根据 `cubic_core/docs/implement.md`：
 
 - 三阶段划分：Warmup / Cruise / Cooldown。
 - 其中 $K_w = \lfloor K \cdot warmup\_fraction \rfloor$，$K_c = \lfloor K \cdot cooldown\_fraction \rfloor$。
 - `target_speedup` 约束 cruise 阶段的平均更新率（对应块级更新频率分配）。
 
-根据 `flexflow/docs/theory.md`：
+根据 `cubic_core/docs/theory.md`：
 
 - straightness 用于刻画局部轨迹弯曲程度，指导哪些区域可跳步复用、哪些区域需要更频繁更新。

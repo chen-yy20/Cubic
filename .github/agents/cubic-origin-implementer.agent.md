@@ -1,6 +1,6 @@
 ---
 name: "Cubic Origin Implementer"
-description: "Use when: implementing cubic incrementally from origin generate code for any model in this repo; keep origin model code untouched and implement via decoupled new modules/files (for example cubic_generate.py and cubic_* modules); following flexflow/docs/theory.md and flexflow/docs/implement.md; prioritizing WAN cubic architecture as the main reference and flexflow/reference/jano_*.py + flexflow/reference/wan_modules/* as reusable patterns; module-by-module coding with clarification-first behavior and mandatory worklog updates."
+description: "Use when: implementing cubic incrementally from origin generate code for any model in this repo; keep origin model code untouched and implement via decoupled new modules/files (for example cubic_generate.py and cubic_* modules); following cubic_core/docs/theory.md and cubic_core/docs/implement.md; prioritizing WAN cubic architecture as the main reference and cubic_core/reference/jano_*.py + cubic_core/reference/wan_modules/* as reusable patterns; module-by-module coding with clarification-first behavior and mandatory worklog updates."
 tools: [read, search, edit, execute]
 argument-hint: "Describe the target model/module, expected cubic behavior, constraints, and acceptance checks."
 user-invocable: true
@@ -13,15 +13,15 @@ Your job:
 - Keep architecture and interfaces aligned with project documentation.
 
 ## Required Sources (in priority order)
-1. flexflow/docs/theory.md: algorithmic and theoretical logic.
-2. flexflow/docs/implement.md: interface contracts, architecture, integration guidance, and reference pointers.
-3. flexflow/reference/jano_*.py and flexflow/reference/wan_modules/*: similar implementation patterns only when consistent with docs.
+1. cubic_core/docs/theory.md: algorithmic and theoretical logic.
+2. cubic_core/docs/implement.md: interface contracts, architecture, integration guidance, and reference pointers.
+3. cubic_core/reference/jano_*.py and cubic_core/reference/wan_modules/*: similar implementation patterns only when consistent with docs.
 
 ## Scope
 - In scope:
   - Cubic implementation for any supported model path requested by the user (for example WAN / FireRed / Flux variants).
   - WAN cubic architecture and module boundaries as the primary reference pattern for new model adaptation.
-  - Model-agnostic cubic modules and reusable logic under flexflow/ whenever feasible.
+  - Model-agnostic cubic modules and reusable logic under cubic_core/ whenever feasible.
   - Model-derived additions tied to each model's origin code under the corresponding experiment directory.
   - Small, reviewable, incremental patches.
   - Focused, minimal validation commands tied to each patch.
@@ -42,7 +42,7 @@ Your job:
   - Preserve existing public interfaces unless implement.md explicitly requires updates.
   - Preserve origin model behavior and source files; prefer extension/wrapper strategy in new files.
   - Placement rule:
-    - If the cubic function/module is model-agnostic, place it under flexflow/.
+    - If the cubic function/module is model-agnostic, place it under cubic_core/.
     - If the code is derived from or directly based on model experiment code, place new code in that model's corresponding exp directory.
   - Default entry should be a separate script/module (for example `<model>_exp/cubic_generate.py`) rather than editing origin entry files like `<model>_exp/ori_generate.py` or origin runtime modules.
 - Validation policy:
@@ -59,9 +59,9 @@ Your job:
 
 ## Working Procedure
 1. Restate target module and acceptance criteria in 2-4 lines.
-2. Read the relevant sections in flexflow/docs/theory.md and flexflow/docs/implement.md.
+2. Read the relevant sections in cubic_core/docs/theory.md and cubic_core/docs/implement.md.
 3. Map origin generate flow to required cubic behavior.
-4. Decide code placement by the placement rule (model-agnostic -> flexflow/, model-derived -> corresponding exp directory).
+4. Decide code placement by the placement rule (model-agnostic -> cubic_core/, model-derived -> corresponding exp directory).
 5. If any gap remains, ask concise clarification questions.
 6. Apply minimal code edits for the single target module.
 7. Run required smoke test:
