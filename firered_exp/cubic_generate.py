@@ -20,11 +20,12 @@ PROMPT = "Transform the object into a realistic miniature product by carefully h
 TAG = "cubic"
 
 SPEEDUP = 2.0
-WARMUP_FRACTION = 0.15
-COOLDOWN_FRACTION = 0.15
+COND_SPEEDUP = 2.0
+WARMUP_FRACTION = 0.1
+COOLDOWN_FRACTION = 0.1
 ANCHOR_INTERVAL = 8
 
-visualize_curvature = False  # 是否启用曲率可视化（会增加额外计算开销）
+visualize_curvature = True  # 是否启用曲率可视化（会增加额外计算开销）
 
 
 def _init_logging() -> None:
@@ -47,6 +48,7 @@ def parse_args() -> argparse.Namespace:
     parser.add_argument("--true_cfg_scale", type=float, default=4.0)
     parser.add_argument("--num_inference_steps", type=int, default=40)
     parser.add_argument("--cubic_target_speedup", type=float, default=SPEEDUP)
+    parser.add_argument("--cubic_cond_target_speedup", type=float, default=COND_SPEEDUP)
     parser.add_argument("--cubic_warmup_fraction", type=float, default=WARMUP_FRACTION)
     parser.add_argument("--cubic_cooldown_fraction", type=float, default=COOLDOWN_FRACTION)
     parser.add_argument("--cubic_anchor_interval", type=int, default=ANCHOR_INTERVAL)
@@ -103,11 +105,12 @@ def main() -> None:
         pipeline = load_pipeline(args.model_path)
     print("Pipeline loaded.", flush=True)
     logging.info(
-        "[firered-run] prompt_id=%s seed=%d steps=%d target_speedup=%.3f warmup_fraction=%.3f cooldown_fraction=%.3f anchor_interval=%d visualization=%s output_dir=%s",
+        "[firered-run] prompt_id=%s seed=%d steps=%d main_speedup=%.3f cond_speedup=%.3f warmup_fraction=%.3f cooldown_fraction=%.3f anchor_interval=%d visualization=%s output_dir=%s",
         get_prompt_id(args.prompt),
         args.seed,
         args.num_inference_steps,
         args.cubic_target_speedup,
+        args.cubic_cond_target_speedup,
         args.cubic_warmup_fraction,
         args.cubic_cooldown_fraction,
         args.cubic_anchor_interval,
@@ -128,6 +131,7 @@ def main() -> None:
         "num_inference_steps": args.num_inference_steps,
         "num_images_per_prompt": 1,
         "cubic_target_speedup": args.cubic_target_speedup,
+        "cubic_cond_target_speedup": args.cubic_cond_target_speedup,
         "cubic_warmup_fraction": args.cubic_warmup_fraction,
         "cubic_cooldown_fraction": args.cubic_cooldown_fraction,
         "cubic_anchor_interval": args.cubic_anchor_interval,
@@ -159,6 +163,7 @@ def main() -> None:
         "true_cfg_scale": args.true_cfg_scale,
         "num_inference_steps": args.num_inference_steps,
         "target_speedup": args.cubic_target_speedup,
+        "cond_target_speedup": args.cubic_cond_target_speedup,
         "warmup_fraction": args.cubic_warmup_fraction,
         "cooldown_fraction": args.cubic_cooldown_fraction,
         "anchor_interval": args.cubic_anchor_interval,

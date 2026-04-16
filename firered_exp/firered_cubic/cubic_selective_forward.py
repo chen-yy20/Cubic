@@ -14,7 +14,9 @@ class FireRedSelectiveForwardEngine:
 
     Current minimal strategy:
     - main-image tokens follow the Cubic step plan
-    - condition-image tokens stay always active
+    - condition-image tokens follow an optional Cubic cond-step plan
+    - when cond-step plan is absent, condition-image tokens stay frozen on selective steps
+    - condition-image tokens are refreshed on full/anchor steps
     - frozen main-image outputs are reused from the previous full/selective step
     """
 
@@ -24,6 +26,11 @@ class FireRedSelectiveForwardEngine:
 
     def reset(self) -> None:
         self.output_cache.clear()
+
+    @staticmethod
+    def _is_cond_active_in_selective(step_phase: str | None) -> bool:
+        # Default policy: cond KV is frozen in cruise-selective steps and refreshed on anchor/full.
+        return False
 
     def forward(
         self,
@@ -36,6 +43,7 @@ class FireRedSelectiveForwardEngine:
         img_shapes,
         attention_kwargs,
         step_plan=None,
+        cond_step_plan=None,
         cache_key: str = "default",
         main_token_count: int | None = None,
         step_idx: int | None = None,
@@ -47,7 +55,9 @@ class FireRedSelectiveForwardEngine:
         if main_token_count < 0 or main_token_count > seq_len:
             raise ValueError(f"Invalid main_token_count={main_token_count} for hidden_states seq_len={seq_len}.")
 
-        use_selective = step_plan is not None and (not step_plan.is_full_compute)
+        main_use_selective = step_plan is not None and (not step_plan.is_full_compute)
+        cond_use_selective = cond_step_plan is not None and (not cond_step_plan.is_full_compute)
+        use_selective = main_use_selective or cond_use_selective
         if not use_selective:
             return self._full_forward_and_refresh_cache(
                 transformer=transformer,
@@ -64,7 +74,11 @@ class FireRedSelectiveForwardEngine:
                 reason="no_selective_plan",
             )
 
-        active_main_idx = torch.unique(step_plan.active_token_indices.long().to(hidden_states.device), sorted=True)
+        if main_use_selective:
+            active_main_idx = torch.unique(step_plan.active_token_indices.long().to(hidden_states.device), sorted=True)
+        else:
+            active_main_idx = torch.empty(0, device=hidden_states.device, dtype=torch.long)
+
         if active_main_idx.numel() > 0 and int(active_main_idx.max().item()) >= main_token_count:
             logger.info(
                 "[firered-selective] step=%s branch=%s active index overflow (max=%d, main=%d), fallback full.",
@@ -105,7 +119,39 @@ class FireRedSelectiveForwardEngine:
                 reason="output_cache_miss",
             )
 
-        condition_idx = torch.arange(main_token_count, seq_len, device=hidden_states.device, dtype=torch.long)
+        cond_token_count = max(0, seq_len - main_token_count)
+        if cond_use_selective and cond_token_count > 0:
+            cond_local_idx = torch.unique(cond_step_plan.active_token_indices.long().to(hidden_states.device), sorted=True)
+            if cond_local_idx.numel() > 0 and int(cond_local_idx.max().item()) >= cond_token_count:
+                logger.info(
+                    "[firered-selective] step=%s branch=%s cond index overflow (max=%d, cond=%d), fallback full.",
+                    "na" if step_idx is None else str(int(step_idx)),
+                    cache_key,
+                    int(cond_local_idx.max().item()),
+                    cond_token_count,
+                )
+                return self._full_forward_and_refresh_cache(
+                    transformer=transformer,
+                    hidden_states=hidden_states,
+                    timestep=timestep,
+                    guidance=guidance,
+                    encoder_hidden_states_mask=encoder_hidden_states_mask,
+                    encoder_hidden_states=encoder_hidden_states,
+                    img_shapes=img_shapes,
+                    attention_kwargs=attention_kwargs,
+                    cache_key=cache_key,
+                    step_idx=step_idx,
+                    step_phase=step_phase,
+                    reason="cond_step_plan_overflow",
+                )
+            condition_idx = cond_local_idx + main_token_count
+        else:
+            cond_active_in_selective = self._is_cond_active_in_selective(step_phase)
+            if cond_active_in_selective:
+                condition_idx = torch.arange(main_token_count, seq_len, device=hidden_states.device, dtype=torch.long)
+            else:
+                condition_idx = torch.empty(0, device=hidden_states.device, dtype=torch.long)
+
         selected_idx = torch.unique(torch.cat([active_main_idx, condition_idx], dim=0), sorted=True)
 
         if selected_idx.numel() == 0:

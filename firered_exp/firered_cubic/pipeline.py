@@ -30,6 +30,7 @@ from flexflow import (
     UpdateFrequencyOptimizer,
 )
 from utils.timer import get_timer
+from firered_cubic.condition_monitor import ConditionComplexityMonitor
 from firered_cubic.cubic_selective_forward import FireRedSelectiveForwardEngine
 from firered_cubic.transformer import CubicQwenImageTransformer2DModel
 
@@ -75,6 +76,7 @@ class CubicQwenImageEditPlusPipeline(QwenImageEditPlusPipeline):
         self.phase_anchor_interval = 8
 
         self.target_speedup = 2.0
+        self.cond_target_speedup = 2.0
         self.alpha = 2.0
         self.beta = 4.0
         self.tau_min = 1
@@ -94,14 +96,19 @@ class CubicQwenImageEditPlusPipeline(QwenImageEditPlusPipeline):
         self.max_blocksize_candidates = 36
 
         self.monitor = CurvatureMonitor(self)
+        self.condition_monitor = ConditionComplexityMonitor(self)
         self.visualizer = CubicVisualizer(self)
         self.partitioner = AdaptivePartitioner(self)
-        self.frequency_optimizer = UpdateFrequencyOptimizer(self)
+        self.main_frequency_optimizer = UpdateFrequencyOptimizer(self)
+        self.cond_frequency_optimizer = UpdateFrequencyOptimizer(self)
         self.step_scheduler = SelectiveStepScheduler(self)
         self.selective_engine = FireRedSelectiveForwardEngine(self)
         self.current_partition = None
         self.current_frequency_plan = None
         self.current_step_plan = None
+        self.current_cond_partition = None
+        self.current_cond_frequency_plan = None
+        self.current_cond_step_plan = None
         self.step_selection_history: list[StepSelectionStats] = []
 
     def _get_inference_phase(self, step: int, total_steps: int) -> str:
@@ -143,14 +150,23 @@ class CubicQwenImageEditPlusPipeline(QwenImageEditPlusPipeline):
         self.partitioner.cv_threshold = float(self.cv_threshold)
         self.partitioner.max_candidates = int(self.max_blocksize_candidates)
 
-        self.frequency_optimizer.target_speedup = float(self.target_speedup)
-        self.frequency_optimizer.alpha = float(self.alpha)
-        self.frequency_optimizer.beta = float(self.beta)
-        self.frequency_optimizer.tau_min = int(self.tau_min)
-        self.frequency_optimizer.tau_max = int(self.tau_max)
-        self.frequency_optimizer.curvature_contrast_gamma = float(self.curvature_contrast_gamma)
-        self.frequency_optimizer.tau_diversity_target_span = float(self.tau_diversity_target_span)
-        self.frequency_optimizer.tau_diversity_max_boost = float(self.tau_diversity_max_boost)
+        self.main_frequency_optimizer.target_speedup = float(self.target_speedup)
+        self.main_frequency_optimizer.alpha = float(self.alpha)
+        self.main_frequency_optimizer.beta = float(self.beta)
+        self.main_frequency_optimizer.tau_min = int(self.tau_min)
+        self.main_frequency_optimizer.tau_max = int(self.tau_max)
+        self.main_frequency_optimizer.curvature_contrast_gamma = float(self.curvature_contrast_gamma)
+        self.main_frequency_optimizer.tau_diversity_target_span = float(self.tau_diversity_target_span)
+        self.main_frequency_optimizer.tau_diversity_max_boost = float(self.tau_diversity_max_boost)
+
+        self.cond_frequency_optimizer.target_speedup = float(self.cond_target_speedup)
+        self.cond_frequency_optimizer.alpha = float(self.alpha)
+        self.cond_frequency_optimizer.beta = float(self.beta)
+        self.cond_frequency_optimizer.tau_min = int(self.tau_min)
+        self.cond_frequency_optimizer.tau_max = int(self.tau_max)
+        self.cond_frequency_optimizer.curvature_contrast_gamma = float(self.curvature_contrast_gamma)
+        self.cond_frequency_optimizer.tau_diversity_target_span = float(self.tau_diversity_target_span)
+        self.cond_frequency_optimizer.tau_diversity_max_boost = float(self.tau_diversity_max_boost)
 
         self.step_scheduler.warmup_fraction = float(self.phase_warmup_fraction)
         self.step_scheduler.cooldown_fraction = float(self.phase_cooldown_fraction)
@@ -195,6 +211,7 @@ class CubicQwenImageEditPlusPipeline(QwenImageEditPlusPipeline):
         cubic_cooldown_fraction: float | None = None,
         cubic_anchor_interval: int | None = None,
         cubic_target_speedup: float | None = None,
+        cubic_cond_target_speedup: float | None = None,
         cubic_enable_visualization: bool = True,
         cubic_results_dir: str | None = None,
         cubic_visual_tag: str | None = None,
@@ -208,13 +225,21 @@ class CubicQwenImageEditPlusPipeline(QwenImageEditPlusPipeline):
             self.phase_anchor_interval = int(cubic_anchor_interval)
         if cubic_target_speedup is not None:
             self.target_speedup = float(cubic_target_speedup)
+        if cubic_cond_target_speedup is not None:
+            self.cond_target_speedup = float(cubic_cond_target_speedup)
+        else:
+            self.cond_target_speedup = float(self.target_speedup)
 
         self._sync_cubic_modules_config()
         self.monitor.reset()
+        self.condition_monitor.reset()
         self.selective_engine.reset()
         self.current_partition = None
         self.current_frequency_plan = None
         self.current_step_plan = None
+        self.current_cond_partition = None
+        self.current_cond_frequency_plan = None
+        self.current_cond_step_plan = None
         self.step_selection_history = []
 
         image_size = image[-1].size if isinstance(image, list) else image.size
@@ -359,14 +384,101 @@ class CubicQwenImageEditPlusPipeline(QwenImageEditPlusPipeline):
         cooldown_steps = max(0, int(len(timesteps) * self.phase_cooldown_fraction))
         cooldown_start = max(0, len(timesteps) - cooldown_steps)
 
+        if image_latents is not None and img_shapes and img_shapes[0] and len(img_shapes[0]) > 1:
+            cond_shape = img_shapes[0][1]
+            cond_token_count = int(cond_shape[0] * cond_shape[1] * cond_shape[2])
+            if cond_token_count > int(image_latents.shape[1]):
+                raise ValueError(
+                    f"Condition token count {cond_token_count} exceeds image_latents sequence length {int(image_latents.shape[1])}."
+                )
+
+            cond_tokens = image_latents[:, :cond_token_count, :]
+            cond_unpacked = self._unpack_token_segment(
+                cond_tokens,
+                token_h=int(cond_shape[1]),
+                token_w=int(cond_shape[2]),
+            )
+            cond_complexity_map = self.condition_monitor.build_from_condition_latents(
+                cond_unpacked,
+                step_idx=0,
+            )
+
+            with get_timer("condition_complexity_partitioner"):
+                ft, ht, wt = cond_complexity_map.shape
+                cond_partition = self.partitioner.partition(
+                    Ft=ft,
+                    Ht=ht,
+                    Wt=wt,
+                    curvature_map=cond_complexity_map,
+                )
+                cond_partition_debug = self.partitioner.describe_partition(
+                    cond_partition,
+                    curvature_map=cond_complexity_map,
+                )
+                cond_block_curvatures = self.condition_monitor.get_block_curvatures(
+                    cond_partition,
+                    complexity_map=cond_complexity_map,
+                )
+
+            with get_timer("condition_complexity_optimizer"):
+                cond_frequency_plan = self.cond_frequency_optimizer.optimize(
+                    partition=cond_partition,
+                    block_curvatures=cond_block_curvatures,
+                )
+                self.current_cond_partition = cond_partition
+                self.current_cond_frequency_plan = cond_frequency_plan
+                self.current_cond_step_plan = self.step_scheduler.build_step_plan(
+                    partition=cond_partition,
+                    block_intervals=cond_frequency_plan.block_intervals,
+                    phase=Phase.CRUISE_ANCHOR,
+                    step_idx=0,
+                    selective_step_idx=0,
+                )
+
+            logger.info(
+                "[firered-cond-complexity] token_grid=(%d,%d,%d) chosen_block_size=%s blocks=%d mean=%.6e min=%.6e max=%.6e",
+                cond_complexity_map.shape[0],
+                cond_complexity_map.shape[1],
+                cond_complexity_map.shape[2],
+                cond_partition_debug.chosen_block_size,
+                cond_partition_debug.block_count,
+                float(cond_complexity_map.float().mean().item()),
+                float(cond_complexity_map.float().amin().item()),
+                float(cond_complexity_map.float().amax().item()),
+            )
+            logger.info(
+                "[firered-cond-optimizer] tau(min=%d max=%d mean=%.3f) mean_update_rate=%.6f achieved_speedup=%.3f histogram=%s",
+                cond_frequency_plan.min_interval,
+                cond_frequency_plan.max_interval,
+                cond_frequency_plan.mean_interval,
+                cond_frequency_plan.mean_update_rate,
+                cond_frequency_plan.achieved_speedup,
+                self._format_interval_histogram(cond_frequency_plan.block_intervals),
+            )
+
+            if cubic_enable_visualization and cubic_results_dir:
+                self.visualizer.visualize_partition_and_frequency(
+                    partition=cond_partition,
+                    curvature_map=cond_complexity_map,
+                    block_curvatures=cond_block_curvatures,
+                    block_intervals=cond_frequency_plan.block_intervals,
+                    step_idx=0,
+                    output_dir=cubic_results_dir,
+                    file_suffix=f"{cubic_visual_tag}_cond_complexity" if cubic_visual_tag else "cond_complexity",
+                )
+
+        elif image_latents is not None:
+            logger.info("[firered-cond-complexity] condition latents exist but no condition shape metadata found, skip cond scheduling.")
+
         logger.info(
-            "[firered-cubic] steps=%d warmup=%d cooldown=%d cooldown_start=%d anchor_interval=%d target_speedup=%.3f gamma=%.3f diversity_span=%.3f",
+            "[firered-cubic] steps=%d warmup=%d cooldown=%d cooldown_start=%d anchor_interval=%d main_speedup=%.3f cond_speedup=%.3f gamma=%.3f diversity_span=%.3f",
             len(timesteps),
             warmup_steps,
             cooldown_steps,
             cooldown_start,
             int(self.phase_anchor_interval),
             float(self.target_speedup),
+            float(self.cond_target_speedup),
             float(self.curvature_contrast_gamma),
             float(self.tau_diversity_target_span),
         )
@@ -408,13 +520,42 @@ class CubicQwenImageEditPlusPipeline(QwenImageEditPlusPipeline):
                             step_debug.is_full_compute,
                         )
 
-                    selective_enabled = self.current_step_plan is not None and (not self.current_step_plan.is_full_compute)
+                    if self.current_cond_partition is not None and self.current_cond_frequency_plan is not None:
+                        selective_step_idx = max(0, i - warmup_steps)
+                        self.current_cond_step_plan = self.step_scheduler.build_step_plan(
+                            partition=self.current_cond_partition,
+                            block_intervals=self.current_cond_frequency_plan.block_intervals,
+                            phase=phase_enum,
+                            step_idx=i,
+                            selective_step_idx=selective_step_idx,
+                        )
+                        cond_step_debug = self.step_scheduler.describe_step_plan(
+                            self.current_cond_step_plan,
+                            self.current_cond_partition,
+                            step_idx=i,
+                        )
+                        logger.info(
+                            "[firered-cond-step-plan] step=%d phase=%s active_blocks=%d frozen_blocks=%d active_tokens=%d frozen_tokens=%d full_compute=%s",
+                            i,
+                            cond_step_debug.phase.value,
+                            cond_step_debug.active_block_count,
+                            cond_step_debug.frozen_block_count,
+                            cond_step_debug.active_token_count,
+                            cond_step_debug.frozen_token_count,
+                            cond_step_debug.is_full_compute,
+                        )
+
+                    selective_enabled = (
+                        (self.current_step_plan is not None and (not self.current_step_plan.is_full_compute))
+                        or (self.current_cond_step_plan is not None and (not self.current_cond_step_plan.is_full_compute))
+                    )
                     step_selection = self._build_step_selection_stats(
                         step_idx=i,
                         phase=phase,
                         main_token_count=int(latents.shape[1]),
                         cond_token_count=0 if image_latents is None else int(image_latents.shape[1]),
                         step_plan=self.current_step_plan,
+                        cond_step_plan=self.current_cond_step_plan,
                     )
                     self.step_selection_history.append(step_selection)
                     logger.info(
@@ -444,7 +585,7 @@ class CubicQwenImageEditPlusPipeline(QwenImageEditPlusPipeline):
                     timestep = t.expand(latents.shape[0]).to(latents.dtype)
                     with get_timer("full_forward"):
                         with self.transformer.cache_context("cond"):
-                            noise_pred = self.selective_engine.forward(
+                            noise_pred_full = self.selective_engine.forward(
                                 transformer=self.transformer,
                                 hidden_states=latent_model_input,
                                 timestep=timestep / 1000,
@@ -454,16 +595,17 @@ class CubicQwenImageEditPlusPipeline(QwenImageEditPlusPipeline):
                                 img_shapes=img_shapes,
                                 attention_kwargs=self.attention_kwargs,
                                 step_plan=self.current_step_plan,
+                                cond_step_plan=self.current_cond_step_plan,
                                 cache_key="cond",
                                 main_token_count=int(latents.shape[1]),
                                 step_idx=i,
                                 step_phase=phase,
                             )
-                        noise_pred = noise_pred[:, : latents.size(1)]
+                        noise_pred = noise_pred_full[:, : latents.size(1)]
 
                         if do_true_cfg:
                             with self.transformer.cache_context("uncond"):
-                                neg_noise_pred = self.selective_engine.forward(
+                                neg_noise_pred_full = self.selective_engine.forward(
                                     transformer=self.transformer,
                                     hidden_states=latent_model_input,
                                     timestep=timestep / 1000,
@@ -473,12 +615,13 @@ class CubicQwenImageEditPlusPipeline(QwenImageEditPlusPipeline):
                                     img_shapes=img_shapes,
                                     attention_kwargs=self.attention_kwargs,
                                     step_plan=self.current_step_plan,
+                                    cond_step_plan=self.current_cond_step_plan,
                                     cache_key="uncond",
                                     main_token_count=int(latents.shape[1]),
                                     step_idx=i,
                                     step_phase=phase,
                                 )
-                            neg_noise_pred = neg_noise_pred[:, : latents.size(1)]
+                            neg_noise_pred = neg_noise_pred_full[:, : latents.size(1)]
                             comb_pred = neg_noise_pred + true_cfg_scale * (noise_pred - neg_noise_pred)
 
                             cond_norm = torch.norm(noise_pred, dim=-1, keepdim=True)
@@ -488,6 +631,8 @@ class CubicQwenImageEditPlusPipeline(QwenImageEditPlusPipeline):
                     is_last_warmup = warmup_steps > 0 and phase == "phase1_warmup" and i == warmup_steps - 1
                     is_cruise_anchor = phase == "phase2_cruise_anchor"
                     if is_last_warmup or is_cruise_anchor:
+                        curvature_map = None
+
                         with get_timer("anchor_step_monitor"):
                             latents_unpacked = self._unpack_latents(latents, height, width, self.vae_scale_factor)
                             noise_unpacked = self._unpack_latents(noise_pred, height, width, self.vae_scale_factor)
@@ -540,7 +685,7 @@ class CubicQwenImageEditPlusPipeline(QwenImageEditPlusPipeline):
                             )
 
                             with get_timer("anchor_step_optimizer"):
-                                frequency_plan = self.frequency_optimizer.optimize(
+                                frequency_plan = self.main_frequency_optimizer.optimize(
                                     partition=partition,
                                     block_curvatures=block_curvatures,
                                 )
@@ -573,7 +718,7 @@ class CubicQwenImageEditPlusPipeline(QwenImageEditPlusPipeline):
                                     block_intervals=frequency_plan.block_intervals,
                                     step_idx=i,
                                     output_dir=cubic_results_dir,
-                                    file_suffix=cubic_visual_tag,
+                                    file_suffix=f"{cubic_visual_tag}_main" if cubic_visual_tag else "main",
                                 )
                                 logger.info(
                                     "[firered-visual] step=%d partition visualization exported to %s/partition_vis",
@@ -628,12 +773,24 @@ class CubicQwenImageEditPlusPipeline(QwenImageEditPlusPipeline):
             self.visualizer.export_curvature_history(
                 self.monitor.curvature_history,
                 cubic_results_dir,
-                file_suffix=cubic_visual_tag,
+                file_suffix=f"{cubic_visual_tag}_main" if cubic_visual_tag else "main",
             )
             logger.info(
-                "[firered-visual] curvature history exported to %s (records=%d)",
+                "[firered-visual] main curvature history exported to %s (records=%d)",
                 cubic_results_dir,
                 len(self.monitor.curvature_history),
+            )
+
+        if cubic_enable_visualization and cubic_results_dir and self.condition_monitor.complexity_history:
+            self.visualizer.export_curvature_history(
+                self.condition_monitor.complexity_history,
+                cubic_results_dir,
+                file_suffix=f"{cubic_visual_tag}_cond_complexity" if cubic_visual_tag else "cond_complexity",
+            )
+            logger.info(
+                "[firered-visual] cond complexity history exported to %s (records=%d)",
+                cubic_results_dir,
+                len(self.condition_monitor.complexity_history),
             )
         self._log_step_selection_summary()
 
@@ -656,19 +813,28 @@ class CubicQwenImageEditPlusPipeline(QwenImageEditPlusPipeline):
         main_token_count: int,
         cond_token_count: int,
         step_plan,
+        cond_step_plan,
     ) -> StepSelectionStats:
         main_total = max(0, int(main_token_count))
         cond_total = max(0, int(cond_token_count))
         total_tokens = main_total + cond_total
 
-        if step_plan is None or step_plan.is_full_compute:
+        main_selective_enabled = step_plan is not None and (not step_plan.is_full_compute)
+        cond_selective_enabled = cond_step_plan is not None and (not cond_step_plan.is_full_compute)
+
+        if not main_selective_enabled:
             main_active = main_total
-            cond_active = cond_total
-            selective_enabled = False
         else:
             main_active = min(main_total, int(step_plan.active_token_indices.numel()))
+
+        if cond_total <= 0:
+            cond_active = 0
+        elif not cond_selective_enabled:
             cond_active = cond_total
-            selective_enabled = True
+        else:
+            cond_active = min(cond_total, int(cond_step_plan.active_token_indices.numel()))
+
+        selective_enabled = main_selective_enabled or cond_selective_enabled
 
         total_selected = main_active + cond_active
         return StepSelectionStats(
@@ -682,6 +848,22 @@ class CubicQwenImageEditPlusPipeline(QwenImageEditPlusPipeline):
             total_tokens=total_tokens,
             selective_enabled=selective_enabled,
         )
+
+    @staticmethod
+    def _unpack_token_segment(token_segment: torch.Tensor, token_h: int, token_w: int) -> torch.Tensor:
+        batch_size, token_count, packed_channels = token_segment.shape
+        expected_tokens = int(token_h) * int(token_w)
+        if token_count != expected_tokens:
+            raise ValueError(
+                f"Token segment length mismatch: got {token_count}, expected {expected_tokens} for token_h={token_h}, token_w={token_w}."
+            )
+        if packed_channels % 4 != 0:
+            raise ValueError(f"Packed channels must be divisible by 4, but got {packed_channels}.")
+
+        channels = packed_channels // 4
+        hidden = token_segment.view(batch_size, token_h, token_w, channels, 2, 2)
+        hidden = hidden.permute(0, 3, 1, 4, 2, 5)
+        return hidden.reshape(batch_size, channels, 1, token_h * 2, token_w * 2)
 
     def _log_step_selection_summary(self) -> None:
         if not self.step_selection_history:
