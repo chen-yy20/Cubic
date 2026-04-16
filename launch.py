@@ -13,6 +13,8 @@ SCRIPT_MAP = {
     },
     "firered": {
         "ori": "firered_exp/ori_generate.py",
+        "cubic": "firered_exp/cubic_generate.py",
+        "kv_drift": "firered_exp/firered_cubic/cond_kv_drift_experiment.py",
     },
     "flux": {
         "ori": "flux1_exp/ori_generate.py",
