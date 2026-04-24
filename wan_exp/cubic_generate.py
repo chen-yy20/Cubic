@@ -25,7 +25,7 @@ from utils.timer import get_time_statistics_dict, init_timer, print_time_statist
 init_timer()
 
 PROMPT = 'Two anthropomorphic cats in comfy boxing gear and bright gloves fight intensely on a spotlighted stage.'
-MODEL_PATH = "/home/chenyy/WORK/models/Wan2.1-T2V-1.3B"
+MODEL_PATH = "/home/fit/zhaijdcyy/WORK/models/Wan2.1-T2V-1.3B"
 # Cubic optimizer / scheduler knobs
 SPEEDUP = 2
 WARMUP = 5

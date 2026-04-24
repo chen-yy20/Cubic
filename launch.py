@@ -13,10 +13,18 @@ SCRIPT_MAP = {
     },
     "firered": {
         "ori": "firered_exp/ori_generate.py",
+        "cubic": "firered_exp/cubic_generate.py",
+        "teacache": "firered_exp/teacache_generate.py",
+        "pab": "firered_exp/PAB_generate.py",
+        "kv_drift": "firered_exp/firered_cubic/cond_kv_drift_experiment.py",
+    },
+    "flux": {
+        "ori": "flux1_exp/ori_generate.py",
+        "cubic": "flux1_exp/cubic_generate.py",
     },
     "flux2k": {
         "ori": "flux2k_exp/ori_generate.py",
-    }
+    },
 }
 
 
@@ -26,7 +34,7 @@ def build_parser():
     parser.add_argument("--method", required=True, help="Method name in selected model family")
     parser.add_argument("--launcher", choices=["python", "srun"], default="srun", help="Launch backend")
     parser.add_argument("--script", default=None, help="Optional custom script path")
-    parser.add_argument("--partition", default="debug", help="SLURM partition for srun")
+    parser.add_argument("--partition", default="a01", help="SLURM partition for srun")
     parser.add_argument("--gpus", type=int, default=1, help="GPUs per node for srun")
     parser.add_argument("--job-name", default="cubic-run", help="SLURM job name for srun")
     parser.add_argument("script_args", nargs=argparse.REMAINDER, help="Extra args passed to target script")
@@ -67,6 +75,7 @@ def main():
     if args.launcher == "python":
         cmd = [sys.executable, script, *script_args]
     else:
+        # pysrun.sh: --ntasks-per-node / --gres 均取自 GPUS_PER_NODE；>1 时会起多个 task，各跑一遍脚本。
         env.update({"NNODES": "1", "GPUS_PER_NODE": str(args.gpus)})
         cmd = [
             "./pysrun.sh",
@@ -75,6 +84,12 @@ def main():
         ]
 
     print("Launching:", " ".join(cmd), flush=True)
+    if args.launcher == "srun":
+        print(
+            f"  srun env: NNODES=1 GPUS_PER_NODE={args.gpus} (每个 task 一个 Python；"
+            f"若日志成对/乱序，先确认未使用 --gpus 2+ 或未并行开两个作业)",
+            flush=True,
+        )
     subprocess.run(cmd, check=True, env=env)
 
 

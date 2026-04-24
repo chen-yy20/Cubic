@@ -605,6 +605,8 @@ def infer_origin_path_from_output_dir(generated_path: str, output_dir: Optional[
     ori_filename = filename.replace(f"{tag}_", "ori_", 1)
     if ori_filename == filename and filename.startswith("cubic_"):
         ori_filename = filename.replace("cubic_", "ori_", 1)
+    if ori_filename == filename and filename.startswith("teacache_"):
+        ori_filename = filename.replace("teacache_", "ori_", 1)
 
     candidates = []
     if output_dir:
@@ -614,19 +616,30 @@ def infer_origin_path_from_output_dir(generated_path: str, output_dir: Optional[
         method_dir = os.path.basename(os.path.dirname(out_abs))
         model_root = os.path.dirname(os.path.dirname(out_abs))
 
-        if method_dir == 'cubic':
+        if method_dir in ("cubic", "teacache"):
             for prompt_candidate in prompt_dir_candidates:
-                candidates.append(os.path.join(model_root, 'ori', prompt_candidate, ori_filename))
+                candidates.append(os.path.join(model_root, "ori", prompt_candidate, ori_filename))
 
         cubic_token = f"{os.sep}cubic{os.sep}"
         if cubic_token in out_abs:
             for prompt_candidate in prompt_dir_candidates:
-                ori_dir = os.path.join(model_root, 'ori', prompt_candidate)
+                ori_dir = os.path.join(model_root, "ori", prompt_candidate)
+                candidates.append(os.path.join(ori_dir, ori_filename))
+
+        teacache_token = f"{os.sep}teacache{os.sep}"
+        if teacache_token in out_abs:
+            for prompt_candidate in prompt_dir_candidates:
+                ori_dir = os.path.join(model_root, "ori", prompt_candidate)
                 candidates.append(os.path.join(ori_dir, ori_filename))
 
     cubic_token = f"{os.sep}cubic{os.sep}"
     if cubic_token in gen_abs:
         ori_abs = gen_abs.replace(cubic_token, f"{os.sep}ori{os.sep}")
+        candidates.append(os.path.join(os.path.dirname(ori_abs), ori_filename))
+
+    teacache_token = f"{os.sep}teacache{os.sep}"
+    if teacache_token in gen_abs:
+        ori_abs = gen_abs.replace(teacache_token, f"{os.sep}ori{os.sep}")
         candidates.append(os.path.join(os.path.dirname(ori_abs), ori_filename))
 
     for candidate in candidates:
