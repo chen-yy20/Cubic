@@ -20,6 +20,11 @@ Cubic 是一个面向 Flow-Matching DiT（Diffusion Transformer）的推理加�
 > 当前 WAN T2V 解耦实现处于 **Stage-A（监测/验证）**：
 > - 已完成 phase 划分、anchor 采样、曲率监测与 straightness 验证链路；
 > - **尚未**在 WAN runtime 中执行 active/frozen token 的 selective sparse forward，因此当前版本不产生 selective sparse acceleration 的 FLOPs 节省。
+>
+> 当前跨模型实现状态（以各模型 cubic 入口为准）：
+> - WAN：monitor/straightness 观测链路已接通，推理仍以 full forward 为主。
+> - Flux2-klein：已接入 selective forward（active token 计算 + frozen token 输出缓存复用），并使用固定 anchor + block cooldown 策略。
+> - FireRed：已接入主图 token 与条件 token 的双路 selective step plan，并在 selective 步复用冻结 token 输出缓存。
 
 ### 1.3 前置假设
 
@@ -142,14 +147,23 @@ cubic/
 └── utils.py # 工具函数
 ```
 
-### 3.2 WAN 解耦入口（当前实现）
+### 3.2 多模型解耦入口（当前实现）
 
-为保证“不改 origin runtime”，当前 WAN T2V 的 Cubic 解耦实现通过独立入口接入：
+为保证“不改 origin runtime”，当前 cubic 采用并行入口方式接入不同模型：
 
-- `wan_exp/cubic_text2video.py`：定义 `CubicWanT2V`，在不修改原 `wan.text2video.WanT2V` 代码的前提下，增加 phase 判定、monitor 更新、straightness 评估与可视化导出。
-- `wan_exp/cubic_generate.py`：实验入口脚本，实例化 `CubicWanT2V` 并运行生成流程。
+- WAN T2V：
+    - `wan_exp/cubic_text2video.py`：定义 `CubicWanT2V`，增加 phase 判定、monitor 更新、straightness 评估与可视化导出。
+    - `wan_exp/cubic_generate.py`：实验入口脚本，实例化 `CubicWanT2V` 并运行生成流程。
+- Flux2-klein：
+    - `flux2k_exp/cubic_generate.py`：实验入口，支持 selective 模式与 attention 对比模式（`--compare_attention_scenarios`）。
+    - `flux2k_exp/flux2k_cubic/pipeline.py`：cubic runtime 主流程，固定前两步 anchor，后续按 block cooldown step plan 做 selective。
+    - `flux2k_exp/flux2k_cubic/optimizer.py`：输出 block 级 cooldown 步数 `c_b`（而非通用周期 `tau_b`）。
+- FireRed image-edit：
+    - `firered_exp/cubic_generate.py`：实验入口，向 pipeline 传入 main/cond speedup 与 phase 参数。
+    - `firered_exp/firered_cubic/pipeline.py`：主图与条件分支独立分块与调度，按 step plan 执行 selective forward。
+    - `firered_exp/firered_cubic/cubic_selective_forward.py`：冻结 token 输出缓存复用，active token 选择性重算。
 
-origin 的推理路径仍由 `wan_exp/wan/` 下原始模块保持，当前解耦实现通过新增文件并行接入。
+origin 的推理路径仍由各自 `*_exp/*` origin 模块保持，cubic 通过新增文件并行接入。
 
 ---
 
@@ -794,6 +808,27 @@ Step 43-49: COOLDOWN, full forward
     - monitor: `curvature_vis/curvature_overview.png`
     - straightness: `straightness_vis/*.png`（若开启评估）
 ```
+
+### 5.2 当前 Flux2-klein cubic 单步数据流（specialized selective）
+
+关键实现语义（`flux2k_exp/flux2k_cubic/pipeline.py` + `optimizer.py`）：
+
+1. 固定前 2 步为 anchor/full forward；其余步进入 selective 阶段。
+2. anchor 步更新曲率图后，按分块曲率生成 block 级 cooldown 计划 `c_b`。
+3. selective 阶段中，block 仅在“最后 `c_b` 个 selective 步”激活；其余步冻结。
+4. selective forward 对 active image token 重算 transformer；冻结 token 复用上一轮输出缓存。
+5. 若出现 cache miss、shape 不匹配或 active 覆盖全部 token，自动回退 full forward 并刷新缓存。
+6. **没有kv cache，因为kv staleness在蒸馏模型中不存在。直接局部计算attention的误差还更小。**
+
+### 5.3 当前 FireRed cubic 单步数据流（dual-plan selective）
+
+关键实现语义（`firered_exp/firered_cubic/pipeline.py` + `cubic_selective_forward.py`）：
+
+1. 主图 token 与条件 token 分别维护分块与频率计划（main/cond 双路）。
+2. 条件分支复杂度图由 condition latents 在 step0 构建，并独立优化 cond 更新频率。
+3. 每步分别构建 `current_step_plan` 与 `current_cond_step_plan`，按 phase 决定是否 selective。
+4. selective forward 仅重算被选中的主图/条件 token，其余 token 直接复用输出缓存。
+5. 若索引越界、缓存缺失或选中全部 token，自动回退 full forward 并刷新缓存。
 
 
 ## 6 Edge Case

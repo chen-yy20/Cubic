@@ -13,6 +13,8 @@ from utils.timer import get_timer, get_time_statistics_dict, init_timer, print_t
 MODEL_PATH = "/home/chenyy/WORK/models/flux2-klein"  # black-forest-labs/FLUX.2-klein-4B
 PROMPT = "A cat holding a sign that says hello world"
 TAG = "ori"
+NUM_IMAGES = 3
+WARMUP_RUNS = 2
 
 
 def parse_args() -> argparse.Namespace:
@@ -35,7 +37,9 @@ def parse_args() -> argparse.Namespace:
     parser.add_argument("--width", type=int, default=1024, help="Output image width")
     parser.add_argument("--guidance_scale", type=float, default=1.0, help="Guidance scale")
     parser.add_argument("--num_inference_steps", type=int, default=4, help="Inference steps")
-    parser.add_argument("--seed", type=int, default=0, help="Random seed")
+    parser.add_argument("--seed", type=int, default=42, help="Base random seed")
+    parser.add_argument("--num_images", type=int, default=NUM_IMAGES, help="Number of images/seeds to generate")
+    parser.add_argument("--warmup_runs", type=int, default=WARMUP_RUNS, help="Warmup runs before timed generation")
     parser.add_argument("--device", type=str, default="cuda", help="Execution device")
     return parser.parse_args()
 
@@ -85,29 +89,49 @@ def main() -> None:
         pipe = load_pipeline(args.model_path, dtype, args.device)
 
     generator_device = pipe._execution_device.type
-    generator = torch.Generator(device=generator_device).manual_seed(args.seed)
+    seeds = [args.seed + i for i in range(max(1, int(args.num_images)))]
     print(
         "Inference config: "
         f"height={args.height}, width={args.width}, steps={args.num_inference_steps}, "
-        f"guidance_scale={args.guidance_scale}, seed={args.seed}, generator_device={generator_device}",
+        f"guidance_scale={args.guidance_scale}, base_seed={args.seed}, "
+        f"num_images={len(seeds)}, warmup_runs={args.warmup_runs}, generator_device={generator_device}",
         flush=True,
     )
 
-    with get_timer("inference"):
-        image = pipe(
-            prompt=args.prompt,
-            height=args.height,
-            width=args.width,
-            guidance_scale=args.guidance_scale,
-            num_inference_steps=args.num_inference_steps,
-            generator=generator,
-        ).images[0]
+    for warmup_idx in range(max(0, int(args.warmup_runs))):
+        warmup_generator = torch.Generator(device=generator_device).manual_seed(seeds[0] + warmup_idx)
+        with torch.inference_mode():
+            pipe(
+                prompt=args.prompt,
+                height=args.height,
+                width=args.width,
+                guidance_scale=args.guidance_scale,
+                num_inference_steps=args.num_inference_steps,
+                generator=warmup_generator,
+            )
+    print(f"Warmup done: runs={max(0, int(args.warmup_runs))}", flush=True)
 
-    output_image_path.parent.mkdir(parents=True, exist_ok=True)
-    with get_timer("save_image"):
-        image.save(output_image_path)
+    image_paths: list[Path] = []
+    for seed in seeds:
+        generator = torch.Generator(device=generator_device).manual_seed(seed)
+        with get_timer("inference"):
+            with torch.inference_mode():
+                image = pipe(
+                    prompt=args.prompt,
+                    height=args.height,
+                    width=args.width,
+                    guidance_scale=args.guidance_scale,
+                    num_inference_steps=args.num_inference_steps,
+                    generator=generator,
+                ).images[0]
 
-    print(f"Image saved to: {output_image_path.resolve()}", flush=True)
+        seed_image_path = output_image_path.with_name(f"{output_image_path.stem}_seed{seed}.png")
+        seed_image_path.parent.mkdir(parents=True, exist_ok=True)
+        with get_timer("save_image"):
+            image.save(seed_image_path)
+        image_paths.append(seed_image_path)
+        print(f"Image saved to: {seed_image_path.resolve()}", flush=True)
+
     print_time_statistics()
 
     params = {
@@ -116,8 +140,11 @@ def main() -> None:
         "model_id": model_id,
         "model_path": args.model_path,
         "prompt": args.prompt,
-        "output_image": str(output_image_path),
-        "seed": args.seed,
+        "output_images": [str(p) for p in image_paths],
+        "base_seed": args.seed,
+        "seeds": seeds,
+        "num_images": len(seeds),
+        "warmup_runs": max(0, int(args.warmup_runs)),
         "height": args.height,
         "width": args.width,
         "guidance_scale": args.guidance_scale,

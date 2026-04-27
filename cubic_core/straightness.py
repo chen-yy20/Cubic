@@ -131,7 +131,7 @@ class StraightnessEvaluator:
         self.records = []
 
     def export_visualization(self, output_dir: str):
-        """Backward-compatible entry; visualization is centralized in flexflow.visualizer."""
+        """Backward-compatible entry; visualization is centralized in cubic_core.visualizer."""
         self.visualizer.export_straightness_records(self.records, output_dir)
 
     def _compute_groundtruth_curvature(self,

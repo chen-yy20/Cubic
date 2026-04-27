@@ -1,6 +1,6 @@
 """Core data structures for Cubic system.
 
-Following flexflow/docs/implement.md section 4.2-4.3.
+Following cubic_core/docs/implement.md section 4.2-4.3.
 """
 
 from __future__ import annotations

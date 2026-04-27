@@ -11,14 +11,14 @@ from utils.timer import get_time_statistics_dict, init_timer, print_time_statist
 
 HEIGHT = 1024
 WIDTH = 1024
-MODEL_PATH = "/home/fit/zhaijdcyy/WORK/models/Flux-1"
+MODEL_PATH = "/home/chenyy/WORK/models/Flux-1"
 PROMPT = "A photorealistic cute cat, wearing a simple blue shirt, standing against a clear sky background."
 NUM_INFERENCE_STEPS = 50
 GUIDANCE_SCALE = 3.5
 NUM_IMAGES = 3
 SEEDS = [42 + i for i in range(NUM_IMAGES)]
 
-SPEEDUP = 8
+SPEEDUP = 4
 WARMUP_FRACTION = 0.1
 COOLDOWN_FRACTION = 0.1
 ANCHOR_INTERVAL = 10

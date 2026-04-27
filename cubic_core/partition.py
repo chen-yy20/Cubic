@@ -37,6 +37,8 @@ class AdaptivePartitioner:
         self.min_block_size = int(getattr(config, 'min_block_size', 2))
         self.max_block_size = int(getattr(config, 'max_block_size', 16))
         self.cv_threshold = float(getattr(config, 'cv_threshold', 0.5))
+        self.min_block_tokens = int(getattr(config, 'min_block_tokens', 1))
+        self.max_block_tokens = int(getattr(config, 'max_block_tokens', 1 << 30))
         self.eps = 1e-8
 
         # Keep candidate search controllable.
@@ -124,16 +126,24 @@ class AdaptivePartitioner:
             return self._default_block_size(ft, ht, wt)
 
         metrics = []
+        filtered_metrics = []
         for block_size in candidates:
             cv_tensor = self._block_cv_tensor_uniform(curvature_map, block_size)
             if cv_tensor.numel() == 0:
                 continue
             mean_cv = float(cv_tensor.mean().item())
             p90_cv = float(torch.quantile(cv_tensor, 0.9).item())
-            metrics.append((block_size, mean_cv, p90_cv, int(cv_tensor.numel())))
+            metric = (block_size, mean_cv, p90_cv, int(cv_tensor.numel()))
+            metrics.append(metric)
+
+            token_count = int(block_size[0] * block_size[1] * block_size[2])
+            if self.min_block_tokens <= token_count <= self.max_block_tokens:
+                filtered_metrics.append(metric)
 
         if not metrics:
             return self._default_block_size(ft, ht, wt)
+
+        metrics = filtered_metrics if filtered_metrics else metrics
 
         # First, prefer candidates where most blocks are internally consistent.
         feasible = [m for m in metrics if m[2] <= self.cv_threshold]

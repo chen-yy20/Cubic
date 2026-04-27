@@ -1,6 +1,6 @@
 # cubic
 
-本仓库用于统一管理多模型推理实验（origin / cubic），当前支持通过 `launch.py` 启动 WAN、FireRed、Flux2-klein 等实验脚本。
+本仓库用于统一管理多模型推理实验（origin / cubic），当前支持通过 `launch.py` 启动 WAN、Flux1、FireRed、Flux2-klein 等实验脚本。
 
 ## 1. 环境配置
 
@@ -61,8 +61,13 @@ python launch.py --model <model> --method <method> [--launcher python|srun] [--g
 
 - `wan + ori` -> `wan_exp/ori_generate.py`
 - `wan + cubic` -> `wan_exp/cubic_generate.py`
+- `flux + ori` -> `flux1_exp/ori_generate.py`
+- `flux + cubic` -> `flux1_exp/cubic_generate.py`
 - `firered + ori` -> `firered_exp/ori_generate.py`
+- `firered + cubic` -> `firered_exp/cubic_generate.py`
+- `firered + kv_drift` -> `firered_exp/firered_cubic/cond_kv_drift_experiment.py`
 - `flux2k + ori` -> `flux2k_exp/ori_generate.py`
+- `flux2k + cubic` -> `flux2k_exp/cubic_generate.py`
 
 ### 2.1 启用 CFG Parallel（`--gpus 2`）
 
@@ -123,7 +128,15 @@ python launch.py --model flux2k --method ori --launcher python
 python launch.py --model flux2k --method ori --launcher python -- --height 768 --width 768
 ```
 
-## 4. WAN 上进行 cubic 实验
+### 3.4 Flux1 origin
+
+```bash
+python launch.py --model flux --method ori --launcher python
+```
+
+## 4. Cubic 实验
+
+### 4.1 WAN cubic
 
 基础命令：
 
@@ -138,6 +151,65 @@ python launch.py --model wan --method cubic --launcher python
 source .venv/bin/activate
 python launch.py --model wan --method cubic --gpus 2
 ```
+
+### 4.2 Flux1 cubic
+
+基础命令：
+
+```bash
+source .venv/bin/activate
+python launch.py --model flux --method cubic
+```
+
+当前 Flux1 cubic 已接入：
+
+- 三阶段推理（warmup / cruise-anchor / cruise-selective / cooldown）
+- anchor 步监测、分块与频率分配
+- selective forward 路径（phase3）
+- 曲率与分块可视化导出（可开关）
+- 生成后质量评测（按 seed 评测并汇总 mean）
+
+### 4.3 FireRed cubic
+
+图像编辑模型。序列由噪声latent和参考图latent拼接而成。噪声latent遵循cubic理论做token selection，参考图latent则通过一次fft复杂度分析，直接判断区间重要性进行selection。
+
+基础命令：
+
+```bash
+source .venv/bin/activate
+python launch.py --model firered --method cubic --launcher python
+```
+
+当前 FireRed cubic 已接入：
+
+- 主图 token 与条件 token 双路调度（main/cond speedup 可分别设置）
+- anchor 步曲率监测与分块重规划
+- selective forward（未选中的 token 复用输出缓存）
+- 条件复杂度分块与可视化导出（可开关）
+
+### 4.4 Flux2-klein cubic
+
+4步推理蒸馏模型，亚秒级生成。Cubic仍然能作用，因为curvature的异构性仍然存在。只是KV Staleness已经没有了，因此不能实现kv cache，但生成效果依然可以接受。
+
+基础命令：
+
+```bash
+source .venv/bin/activate
+python launch.py --model flux2k --method cubic --launcher python
+```
+
+attention 场景对比（baseline / no-kv / stale-kv）示例：
+
+```bash
+python launch.py --model flux2k --method cubic --launcher python -- --compare_attention_scenarios
+```
+
+当前 Flux2-klein cubic 已接入：
+
+- 固定前两步 anchor，后续 selective 的特化流程
+- block 级 cooldown 策略（按曲率分桶）
+- selective forward（active token 重算 + frozen token 输出缓存复用）
+- 多 seed 生成与质量评测汇总
 
 ## 5. 输出文件位置与含义
 
@@ -202,13 +274,61 @@ results/flux2/<model_id>/ori/<prompt_id>/
 - `ori_<prompt_id>_<model_id>.png`：生成图片。
 - `ori_params_metrics.json`：参数与计时统计。
 
-### 5.5 质量指标（WAN）说明
+### 5.5 Flux1 cubic 输出目录
 
-WAN 路径会调用质量评估并写入日志/JSON，常见指标：
+```text
+results/flux/cubic/<prompt_id>_<speedup>x/
+```
+
+常见文件与含义：
+
+- `cubic_<prompt_id>_seed<seed>.png`
+	- 含义：每个 seed 的最终生成图片。
+- `cubic_params_metrics.json`
+	- 含义：参数、计时统计、质量评测结果（`per_seed` 与 `mean`）。
+- `curvature_vis/curvature_overview_seed<seed>.png`（开启可视化时）
+	- 含义：按 seed 导出的曲率总览图。
+- `partition_vis/step_XXXX_frame_strip_seed<seed>.png`（开启可视化时）
+	- 含义：anchor 步分块与 tau 可视化条带图。
+- `partition_vis/step_XXXX_partition_summary_seed<seed>.txt`（开启可视化时）
+	- 含义：对应 anchor 步的分块统计与频率分配摘要。
+
+### 5.6 FireRed cubic 输出目录
+
+```text
+results/firered/<model_id>/cubic/<prompt_id>_<speedup>x/
+```
+
+常见文件与含义：
+
+- `cubic_<prompt_id>_<model_id>.png`：编辑结果图。
+- `cubic_params_metrics.json`：参数、计时统计与质量指标（若开启评测）。
+- `partition_vis/*.png|*.txt`（开启可视化时）：主图/条件分块与频率摘要。
+- `curvature_vis/*.png`（开启可视化时）：主图曲率历史总览。
+
+### 5.7 Flux2-klein cubic 输出目录
+
+```text
+results/flux2/<model_id>/cubic_<mode>/<prompt_id>/
+```
+
+其中 `<mode>` 默认为 `selective`，开启 `--compare_attention_scenarios` 时为 `attention_compare`。
+
+常见文件与含义：
+
+- `cubic_<prompt_id>_<model_id>_seed<seed>.png`：每个 seed 的生成图。
+- `cubic_params_metrics.json`：参数、计时统计与质量评测汇总（`per_seed` + `mean`）。
+- `straightness_vis/*.png|*.txt`（开启可视化时）：straightness 与曲率诊断导出。
+- `cubic_attention_compare.json`（仅对比模式）：baseline/no-kv/stale-kv 对比结果。
+
+### 5.8 质量指标（WAN / Flux）说明
+
+WAN 与 Flux 路径都可调用质量评估并写入日志/JSON，常见指标：
 
 - `PSNR` / `SSIM`：保真度指标。
 - `LPIPS`：感知差异指标（越低通常越接近 baseline）。
 - `FID` / `FVD`：分布级图像/视频质量距离指标。
+	- 图像任务（Flux）通常仅有 `FID`，`FVD` 可能为 `null`。
 
 ## 6. 重点超参数说明（WAN cubic）
 
@@ -258,12 +378,12 @@ python launch.py --model wan --method cubic --launcher python -- --straightness_
 
 ## 7. 参数与理论的对应关系
 
-根据 `flexflow/docs/implement.md`：
+根据 `cubic_core/docs/implement.md`：
 
 - 三阶段划分：Warmup / Cruise / Cooldown。
 - 其中 $K_w = \lfloor K \cdot warmup\_fraction \rfloor$，$K_c = \lfloor K \cdot cooldown\_fraction \rfloor$。
 - `target_speedup` 约束 cruise 阶段的平均更新率（对应块级更新频率分配）。
 
-根据 `flexflow/docs/theory.md`：
+根据 `cubic_core/docs/theory.md`：
 
 - straightness 用于刻画局部轨迹弯曲程度，指导哪些区域可跳步复用、哪些区域需要更频繁更新。

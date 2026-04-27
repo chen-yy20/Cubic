@@ -1,0 +1,4 @@
+interface:
+  display_name: "Cubic Origin Implementer"
+  short_description: "Implement cubic from repo origin code safely"
+  default_prompt: "Use $cubic-origin-implementer to add or extend cubic support for a target model in this repository."

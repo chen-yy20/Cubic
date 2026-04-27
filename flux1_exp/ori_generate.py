@@ -15,7 +15,7 @@ from utils.timer import (
 
 HEIGHT = 1024
 WIDTH = 1024
-MODEL_PATH = "/home/fit/zhaijdcyy/WORK/models/Flux-1"
+MODEL_PATH = "/home/chenyy/WORK/models/Flux-1"
 PROMPT = "A photorealistic cute cat, wearing a simple blue shirt, standing against a clear sky background."
 NUM_INFERENCE_STEPS = 50
 GUIDANCE_SCALE = 3.5

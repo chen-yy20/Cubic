@@ -7,7 +7,7 @@ import torch
 from tqdm import tqdm
 
 from flux.pipeline import FluxPipeline, calculate_shift, retrieve_timesteps
-from cubic_core import (
+from flexflow import (
     AdaptivePartitioner,
     CurvatureMonitor,
     CubicVisualizer,

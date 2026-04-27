@@ -10,7 +10,7 @@ import torch.cuda.amp as amp
 
 from dist.parallel_state import get_cp_group, get_cp_worldsize
 from tqdm import tqdm
-from wan_exp.cubic_selective_forward import WanSelectiveForwardEngine
+from wan_exp.wan_cubic.cubic_selective_forward import WanSelectiveForwardEngine
 
 from flexflow import (
     CurvatureMonitor,

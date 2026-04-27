@@ -1,0 +1,4 @@
+interface:
+  display_name: "Cubic Worklog Maintainer"
+  short_description: "Append concise Chinese cubic progress logs"
+  default_prompt: "Use $cubic-worklog-maintainer to append a Chinese worklog entry after a cubic implementation change."

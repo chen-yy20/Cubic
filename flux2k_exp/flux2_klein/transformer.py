@@ -155,6 +155,8 @@ class Flux2AttnProcessor:
             query = apply_rotary_emb(query, image_rotary_emb, sequence_dim=1)
             key = apply_rotary_emb(key, image_rotary_emb, sequence_dim=1)
 
+        # kv cache update and reuse
+
         hidden_states = dispatch_attention_fn(
             query,
             key,
@@ -290,6 +292,8 @@ class Flux2ParallelSelfAttnProcessor:
         if image_rotary_emb is not None:
             query = apply_rotary_emb(query, image_rotary_emb, sequence_dim=1)
             key = apply_rotary_emb(key, image_rotary_emb, sequence_dim=1)
+
+        # kv cache update and reuse
 
         hidden_states = dispatch_attention_fn(
             query,
@@ -442,6 +446,7 @@ class Flux2SingleTransformerBlock(nn.Module):
         norm_hidden_states = (1 + mod_scale) * norm_hidden_states + mod_shift
 
         joint_attention_kwargs = joint_attention_kwargs or {}
+
         attn_output = self.attn(
             hidden_states=norm_hidden_states,
             image_rotary_emb=image_rotary_emb,
@@ -717,11 +722,6 @@ class Flux2Transformer2DModel(
         guidance_embeds: bool = True,
     ):
         super().__init__()
-        print(
-            "Initializing Flux2Transformer2DModel "
-            f"(patch_size={patch_size}, in_channels={in_channels}, num_layers={num_layers}, num_single_layers={num_single_layers})",
-            flush=True,
-        )
         self.out_channels = out_channels or in_channels
         self.inner_dim = num_attention_heads * attention_head_dim
 
