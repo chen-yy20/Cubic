@@ -10,7 +10,7 @@ warnings.filterwarnings('ignore')
 import torch
 import torch.distributed as dist
 
-from cubic_text2video import CubicWanT2V
+from wan_cubic.cubic_text2video import CubicWanT2V
 from wan.configs import WAN_CONFIGS, SIZE_CONFIGS, SUPPORTED_SIZES
 from wan.utils.utils import cache_video, str2bool
 

@@ -51,7 +51,7 @@ def parse_args() -> argparse.Namespace:
     parser.add_argument(
         "--rel_l1_thresh",
         type=float,
-        default=0.0,
+        default=0.2,
         help="TeaCache 累积阈值；越大跳过越多、越快，画质风险越高（常见 0.4~0.7）",
     )
     parser.add_argument(

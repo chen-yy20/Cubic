@@ -594,19 +594,31 @@ def infer_origin_path_from_output_dir(generated_path: str, output_dir: Optional[
 
     def _prompt_dir_candidates(name: str) -> list[str]:
         candidates = [name]
-        # Support output dirs like <prompt_id>_2x or <prompt_id>_2.5x.
-        stripped = re.sub(r'_[0-9]+(?:\.[0-9]+)?x$', '', name)
-        if stripped and stripped != name:
-            candidates.append(stripped)
+        # Strip known speed/param suffixes to find the base prompt_id used by ori.
+        #   cubic:   _2x / _2.5x
+        #   tocache: _fr0.1
+        #   pab:     _skip5
+        #   jano:    _si2_mi4
+        _suffix_patterns = [
+            r'_[0-9]+(?:\.[0-9]+)?x$',
+            r'_fr[0-9]+(?:\.[0-9]+)?$',
+            r'_skip[0-9]+$',
+            r'_si[0-9]+_mi[0-9]+$',
+        ]
+        for pat in _suffix_patterns:
+            stripped = re.sub(pat, '', name)
+            if stripped and stripped != name:
+                candidates.append(stripped)
+                break
         return candidates
 
     gen_abs = os.path.abspath(generated_path)
     filename = os.path.basename(gen_abs)
     ori_filename = filename.replace(f"{tag}_", "ori_", 1)
-    if ori_filename == filename and filename.startswith("cubic_"):
-        ori_filename = filename.replace("cubic_", "ori_", 1)
-    if ori_filename == filename and filename.startswith("teacache_"):
-        ori_filename = filename.replace("teacache_", "ori_", 1)
+    for _prefix in ("cubic_", "teacache_", "tocache_", "pab_", "jano_"):
+        if ori_filename == filename and filename.startswith(_prefix):
+            ori_filename = filename.replace(_prefix, "ori_", 1)
+            break
 
     candidates = []
     if output_dir:
@@ -616,31 +628,22 @@ def infer_origin_path_from_output_dir(generated_path: str, output_dir: Optional[
         method_dir = os.path.basename(os.path.dirname(out_abs))
         model_root = os.path.dirname(os.path.dirname(out_abs))
 
-        if method_dir in ("cubic", "teacache"):
+        if method_dir in ("cubic", "teacache", "tocache", "pab", "jano"):
             for prompt_candidate in prompt_dir_candidates:
                 candidates.append(os.path.join(model_root, "ori", prompt_candidate, ori_filename))
 
-        cubic_token = f"{os.sep}cubic{os.sep}"
-        if cubic_token in out_abs:
-            for prompt_candidate in prompt_dir_candidates:
-                ori_dir = os.path.join(model_root, "ori", prompt_candidate)
-                candidates.append(os.path.join(ori_dir, ori_filename))
+        for _method_token in ("cubic", "teacache", "tocache", "pab", "jano"):
+            token = f"{os.sep}{_method_token}{os.sep}"
+            if token in out_abs:
+                for prompt_candidate in prompt_dir_candidates:
+                    ori_dir = os.path.join(model_root, "ori", prompt_candidate)
+                    candidates.append(os.path.join(ori_dir, ori_filename))
 
-        teacache_token = f"{os.sep}teacache{os.sep}"
-        if teacache_token in out_abs:
-            for prompt_candidate in prompt_dir_candidates:
-                ori_dir = os.path.join(model_root, "ori", prompt_candidate)
-                candidates.append(os.path.join(ori_dir, ori_filename))
-
-    cubic_token = f"{os.sep}cubic{os.sep}"
-    if cubic_token in gen_abs:
-        ori_abs = gen_abs.replace(cubic_token, f"{os.sep}ori{os.sep}")
-        candidates.append(os.path.join(os.path.dirname(ori_abs), ori_filename))
-
-    teacache_token = f"{os.sep}teacache{os.sep}"
-    if teacache_token in gen_abs:
-        ori_abs = gen_abs.replace(teacache_token, f"{os.sep}ori{os.sep}")
-        candidates.append(os.path.join(os.path.dirname(ori_abs), ori_filename))
+    for _method_token in ("cubic", "teacache", "tocache", "pab", "jano"):
+        token = f"{os.sep}{_method_token}{os.sep}"
+        if token in gen_abs:
+            ori_abs = gen_abs.replace(token, f"{os.sep}ori{os.sep}")
+            candidates.append(os.path.join(os.path.dirname(ori_abs), ori_filename))
 
     for candidate in candidates:
         if os.path.exists(candidate):

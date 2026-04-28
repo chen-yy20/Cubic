@@ -8,3 +8,4 @@ reference/
 uv.lock
 *.sh
 detectron2/
+data/

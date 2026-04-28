@@ -15,18 +15,18 @@ from utils.quality_metric import evaluate_quality_with_origin
 from utils.results import get_prompt_id, save_params_and_metrics
 from utils.timer import get_time_statistics_dict, get_timer, init_timer, print_time_statistics
 
-MODEL_PATH = "/home/chenyy/WORK/models/firered-image-edit"
-IMAGE_PATH = "/home/chenyy/WORK/cyy/cubic/firered_exp/examples/cola.png"
+MODEL_PATH = "/home/fit/zhaijdcyy/WORK/models/FireRed-Image-Edit-1.0"
+IMAGE_PATH = "/home/fit/zhaijdcyy/WORK/Cubic/firered_exp/examples/cola.png"
 PROMPT = "Transform the object into a realistic miniature product by carefully holding it between your thumb and forefinger."
 TAG = "cubic"
 
-SPEEDUP = 2.0
-COND_SPEEDUP = 2.0
+SPEEDUP = 8.0
+COND_SPEEDUP = 8.0
 WARMUP_FRACTION = 0.1
 COOLDOWN_FRACTION = 0.1
 ANCHOR_INTERVAL = 8
 
-visualize_curvature = False  # 是否启用曲率可视化（会增加额外计算开销）
+visualize_curvature = True  # 是否启用曲率可视化（会增加额外计算开销）
 quality_eval = True
 
 

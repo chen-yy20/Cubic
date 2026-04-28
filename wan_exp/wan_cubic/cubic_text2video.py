@@ -12,7 +12,7 @@ from dist.parallel_state import get_cp_group, get_cp_worldsize
 from tqdm import tqdm
 from wan_exp.wan_cubic.cubic_selective_forward import WanSelectiveForwardEngine
 
-from flexflow import (
+from cubic_core import (
     CurvatureMonitor,
     StraightnessEvaluator,
     AdaptivePartitioner,
