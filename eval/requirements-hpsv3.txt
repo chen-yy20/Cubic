@@ -1,3 +1,11 @@
 # hpsv3 在 import 时会经 train/qwen2vl_trainer 拉取下列依赖（未必在 pip 的 hpsv3 元数据里声明）
+#
+# torch / torchvision 必须版本匹配并从同一渠道安装，否则 import torchvision 可能报：
+# RuntimeError: operator torchvision::nms does not exist
+# 例：torch 2.5.x 对应 torchvision 0.20.x；勿让 pip 单独把 torchvision 升到 0.26+ 而 torch 仍停在 2.5。
+# CUDA 环境请用官方索引成对安装，例如：
+#   pip install torch==2.5.1 torchvision==0.20.1 --index-url https://download.pytorch.org/whl/cu124
+torch==2.5.1
+torchvision==0.20.1
 matplotlib>=3.7
 tensorboard>=2.14

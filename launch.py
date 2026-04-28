@@ -14,6 +14,9 @@ SCRIPT_MAP = {
     "firered": {
         "ori": "firered_exp/ori_generate.py",
         "cubic": "firered_exp/cubic_generate.py",
+        "teacache": "firered_exp/teacache_generate.py",
+        "pab": "firered_exp/PAB_generate.py",
+        "tocache": "firered_exp/tocache_generate.py",
         "kv_drift": "firered_exp/firered_cubic/cond_kv_drift_experiment.py",
     },
     "flux": {

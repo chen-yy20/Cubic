@@ -37,7 +37,7 @@ def main() -> None:
 
     _log("开始 reward 推理…")
     t1 = time.perf_counter()
-    rewards = inferencer.reward(prompts, image_paths=image_paths)
+    rewards = inferencer.reward(image_paths, prompts)
     _log(f"推理结束，耗时 {time.perf_counter() - t1:.1f}s")
     scores = [reward[0].item() for reward in rewards]
     print(f"Image scores: {scores}")

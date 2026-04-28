@@ -7,3 +7,4 @@ reference/
 .venv-hpsv3
 uv.lock
 *.sh
+detectron2/
