@@ -26,7 +26,11 @@ from wan.utils.fm_solvers import (
 from wan.utils.fm_solvers_unipc import FlowUniPCMultistepScheduler
 # from .train_free_utils import make_ar1_noise, temporal_align_step
 from .tocache.apply_toca import apply_toca_to_wan
-from jano.dist.parallel_state import get_cp_group, get_cp_worldsize
+
+try:
+    from dist.parallel_state import get_cp_group, get_cp_worldsize
+except ImportError:
+    from jano.dist.parallel_state import get_cp_group, get_cp_worldsize
 
 from utils.timer import get_timer
 

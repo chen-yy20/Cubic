@@ -10,15 +10,24 @@ SCRIPT_MAP = {
     "wan": {
         "ori": "wan_exp/ori_generate.py",
         "cubic": "wan_exp/cubic_generate.py",
+        "teacache": "wan_exp/teacache_generate.py",
+        "pab": "wan_exp/pab_generate.py",
+        "tocache": "wan_exp/tocache_generate.py",
     },
     "firered": {
         "ori": "firered_exp/ori_generate.py",
         "cubic": "firered_exp/cubic_generate.py",
+        "teacache": "firered_exp/teacache_generate.py",
+        "pab": "firered_exp/PAB_generate.py",
+        "tocache": "firered_exp/tocache_generate.py",
+        "jano": "firered_exp/jano_generate.py",
         "kv_drift": "firered_exp/firered_cubic/cond_kv_drift_experiment.py",
+        "pie_bench": "firered_exp/pie_bench_batch_generate.py",
     },
     "flux": {
         "ori": "flux1_exp/ori_generate.py",
         "cubic": "flux1_exp/cubic_generate.py",
+        "teacache": "flux1_exp/teacache_generate.py",
     },
     "flux2k": {
         "ori": "flux2k_exp/ori_generate.py",
@@ -66,15 +75,25 @@ def main():
     elif args.method == "jano":
         env["ENABLE_JANO"] = "1"
 
+    extra_paths = [repo_root]
+    if args.method == "jano":
+        extra_paths.append(os.path.join(repo_root, "firered_exp"))
     if env.get("PYTHONPATH") and env["PYTHONPATH"].strip():
-        env["PYTHONPATH"] = os.pathsep.join([repo_root, env["PYTHONPATH"]])
+        env["PYTHONPATH"] = os.pathsep.join(extra_paths + [env["PYTHONPATH"]])
     else:
-        env["PYTHONPATH"] = repo_root
+        env["PYTHONPATH"] = os.pathsep.join(extra_paths)
 
     if args.launcher == "python":
         cmd = [sys.executable, script, *script_args]
     else:
-        env.update({"NNODES": "1", "GPUS_PER_NODE": str(args.gpus)})
+        env.update(
+            {
+                "NNODES": "1",
+                "GPUS_PER_NODE": str(args.gpus),
+                "PARTITION": args.partition,
+                "JOB_NAME": args.job_name,
+            }
+        )
         cmd = [
             "./pysrun.sh",
             script,

@@ -15,8 +15,8 @@ from utils.quality_metric import evaluate_quality_with_origin
 from utils.results import get_prompt_id, save_params_and_metrics
 from utils.timer import get_time_statistics_dict, get_timer, init_timer, print_time_statistics
 
-MODEL_PATH = "/home/chenyy/WORK/models/firered-image-edit"
-IMAGE_PATH = "/home/chenyy/WORK/cyy/cubic/firered_exp/examples/cola.png"
+MODEL_PATH = "/home/fit/zhaijdcyy/WORK/models/FireRed-Image-Edit-1.0"
+IMAGE_PATH = "/home/fit/zhaijdcyy/WORK/Cubic/firered_exp/examples/cola.png"
 PROMPT = "Transform the object into a realistic miniature product by carefully holding it between your thumb and forefinger."
 TAG = "cubic"
 

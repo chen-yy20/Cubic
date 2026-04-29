@@ -25,7 +25,7 @@ from dist.parallel_state import (
 init_timer()
 
 PROMPT = "Two anthropomorphic cats in comfy boxing gear and bright gloves fight intensely on a spotlighted stage."
-MODEL_PATH = "/home/chenyy/WORK/models/Wan2.1-T2V-1.3B"
+MODEL_PATH = "/home/fit/zhaijdcyy/WORK/models/Wan2.1-T2V-1.3B"
 
 TAG = "ori"
 model_id = "1.3B" if "1.3B" in MODEL_PATH else "14B"

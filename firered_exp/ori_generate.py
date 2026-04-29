@@ -13,8 +13,8 @@ from firered.transformer import QwenImageTransformer2DModel
 from utils.results import get_prompt_id, save_params_and_metrics
 from utils.timer import get_time_statistics_dict, get_timer, init_timer, print_time_statistics
 
-MODEL_PATH = "/home/chenyy/WORK/models/firered-image-edit"  # FireRedTeam/FireRed-Image-Edit-1.0
-IMAGE_PATH = "/home/chenyy/WORK/cyy/cubic/firered_exp/examples/cola.png"
+MODEL_PATH = "/home/fit/zhaijdcyy/WORK/models/FireRed-Image-Edit-1.0"
+IMAGE_PATH = "/home/fit/zhaijdcyy/WORK/Cubic/firered_exp/examples/cola.png"
 PROMPT = "Transform the object into a realistic miniature product by carefully holding it between your thumb and forefinger."
 TAG = "ori"
 
@@ -74,7 +74,7 @@ def parse_args() -> argparse.Namespace:
     parser.add_argument(
         "--num_inference_steps",
         type=int,
-        default=40,
+        default=50,
         help="Number of inference steps",
     )
     parser.add_argument(

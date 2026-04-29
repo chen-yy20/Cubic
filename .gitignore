@@ -4,3 +4,8 @@ __pycache__/
 .DS_Store
 results/
 reference/
+.venv-hpsv3
+uv.lock
+*.sh
+detectron2/
+data/

@@ -4,6 +4,24 @@ Design goal (per user requirement):
 - Cubic decides only one global block size (f, h, w)
 - Then uniformly tiles the whole latent/token grid with this block size
 - Selection criterion: each block should have internally consistent curvature
+
+Model-type presets
+------------------
+Different model families require different default block-size parameters:
+
+* **wan** (T2V): token grid is F×H×W.  F adds a temporal dimension that
+  multiplies block count by F if block sizes are kept T2I-sized.  Larger
+  blocks and a higher CV threshold are needed to keep partitioning coarse.
+
+* **flux / firered** (T2I / T2V-with-explicit-config): these pipelines
+  explicitly set ``min_block_size``, ``max_block_size``, etc. on *self*
+  **before** constructing ``AdaptivePartitioner(self)``, so the preset
+  defaults below are never reached for those models.
+
+To add support for a new model family, either:
+  1. Set ``config.model_type = '<name>'`` and add an entry to ``_PRESETS``, or
+  2. Explicitly set all partition parameters on the config object before
+     constructing ``AdaptivePartitioner``.
 """
 
 from __future__ import annotations
@@ -14,6 +32,55 @@ from typing import Dict, List, Optional, Sequence, Tuple
 import torch
 
 from .types import Block, Partition
+
+# ---------------------------------------------------------------------------
+# Per-model-type default configurations
+# ---------------------------------------------------------------------------
+
+_PRESETS: Dict[str, Dict] = {
+    # Wan T2V: token grid has an extra temporal dimension (F×H×W).
+    # Using the T2I-sized defaults would create far too many blocks.
+    'wan': {
+        'min_block_size': 3.5,
+        'max_block_size': 32,
+        'cv_threshold': 0.8,
+        'min_block_tokens': 64,
+        'max_block_tokens': 4096,
+        'max_blocksize_candidates': 36,
+    },
+    # Original defaults, also used for flux and firered (which set all
+    # partition params explicitly, so these defaults are never reached).
+    'default': {
+        'min_block_size': 2,
+        'max_block_size': 16,
+        'cv_threshold': 0.5,
+        'min_block_tokens': 1,
+        'max_block_tokens': 1 << 30,
+        'max_blocksize_candidates': 36,
+    },
+}
+
+
+def _detect_model_type(config) -> str:
+    """Infer the model family from a config object.
+
+    Priority:
+    1. Explicit ``config.model_type`` attribute (any value, lowercased).
+    2. Heuristic: wan configs (EasyDict) carry ``vae_stride`` but do *not*
+       set ``min_block_size``; flux/firered pipeline objects always set
+       ``min_block_size`` on *self* before constructing the partitioner.
+    3. Falls back to ``'default'``.
+    """
+    explicit = getattr(config, 'model_type', None)
+    if explicit is not None:
+        name = str(explicit).lower()
+        return name if name in _PRESETS else 'default'
+
+    # Wan configs have vae_stride but never set min_block_size.
+    if hasattr(config, 'vae_stride') and not hasattr(config, 'min_block_size'):
+        return 'wan'
+
+    return 'default'
 
 
 @dataclass
@@ -34,15 +101,18 @@ class AdaptivePartitioner:
     """Choose a global block size and apply uniform 3D tiling."""
 
     def __init__(self, config):
-        self.min_block_size = int(getattr(config, 'min_block_size', 2))
-        self.max_block_size = int(getattr(config, 'max_block_size', 16))
-        self.cv_threshold = float(getattr(config, 'cv_threshold', 0.5))
-        self.min_block_tokens = int(getattr(config, 'min_block_tokens', 1))
-        self.max_block_tokens = int(getattr(config, 'max_block_tokens', 1 << 30))
+        model_type = _detect_model_type(config)
+        preset = _PRESETS[model_type]
+
+        self.min_block_size = int(getattr(config, 'min_block_size', preset['min_block_size']))
+        self.max_block_size = int(getattr(config, 'max_block_size', preset['max_block_size']))
+        self.cv_threshold = float(getattr(config, 'cv_threshold', preset['cv_threshold']))
+        self.min_block_tokens = int(getattr(config, 'min_block_tokens', preset['min_block_tokens']))
+        self.max_block_tokens = int(getattr(config, 'max_block_tokens', preset['max_block_tokens']))
         self.eps = 1e-8
 
         # Keep candidate search controllable.
-        self.max_candidates = int(getattr(config, 'max_blocksize_candidates', 36))
+        self.max_candidates = int(getattr(config, 'max_blocksize_candidates', preset['max_blocksize_candidates']))
 
     def partition(
         self,
