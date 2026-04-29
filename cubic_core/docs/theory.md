@@ -30,7 +30,23 @@ $$
 \mathbf{x} \in \mathbb{R}^{C \times F \times H \times W}
 $$
 
-（对于图像 $F=1$）。我们对时空维度 $(f, h, w)$ 进行均匀分块，将张量划分为 $B$ 个不重叠的块 $\{b\}_{1}^{B}$。
+（对于图像 $F=1$）。在实际实现中，DiT 本身在 token space 上工作。记其 token 网格为
+
+$$
+\Omega \triangleq \{(f,h,w)\mid 0 \le f < F_t,\; 0 \le h < H_t,\; 0 \le w < W_t\}
+$$
+
+其中 $(F_t, H_t, W_t)$ 为 token-space 尺寸。Cubic 的 monitor 先在 latent space 上估计曲率，再按照与模型 patch size 一致的方式把曲率聚合到该 token 网格上。随后，Cubic **并不是直接固定一套手工 block**，而是在每个 anchor step 基于当前 token-space 曲率图，从候选 block size 集合中选择一个**全局 block size**
+
+$$
+\mathbf{b} = (b_f, b_h, b_w)
+$$
+
+并用该尺寸对整个 token 网格做均匀平铺；边界块允许被截断。因此，Cubic 的 block 逻辑是：
+
+- **自适应的是 block 粒度（global block size）**
+- **均匀的是在给定粒度下的空间切分（uniform tiling）**
+- **调度的是切分后各 block 的更新频率 $\tau_b$**
 
 **经验观察 (Empirical Observation)：** 在固定总步数 $K$ 的采样过程中，不同块的生成轨迹表现出显著的**异质性 (Spatial Heterogeneity)**——
 
@@ -43,7 +59,7 @@ $$
 
 > **观察** → 内容复杂度与收敛速度强相关
 > **分析** → 底层原因是局部流直线度 (Local Flow Straightness) 决定了步长容忍度 (Step-size Tolerance)
-> **设计** → 基于 Block-wise Flow Straightness 的自适应调度，对不同块分配不同的更新频率（ZOH 缓存策略）
+> **设计** → 基于 token-space curvature proxy 先选择合适的 cache granularity（block size），再对块分配不同的更新频率（ZOH 缓存策略）
 
 ---
 
@@ -51,55 +67,55 @@ $$
 
 ### §3.1 轨迹曲率的定义
 
-对于块 $b$，其在真实 ODE 轨迹上的速度场随时间的**全导数**为：
+在进入 partition 之前，我们先在 **token level** 定义局部轨迹曲率。对于 token 位置 $i \in \Omega$，其在真实 ODE 轨迹上的速度场随时间的**全导数**为：
 
 $$
-\frac{d v_\theta^{(b)}}{dt}(t) = \frac{\partial v_\theta^{(b)}}{\partial t} + \left(\nabla_{x^b} v_\theta^{(b)}\right) \cdot v_\theta^{(b)} \tag{3.1}
+\frac{d v_{\theta,i}}{dt}(t) = \frac{\partial v_{\theta,i}}{\partial t} + \left(\nabla_{x_i} v_{\theta,i}\right) \cdot v_{\theta,i} \tag{3.1}
 $$
 
-其中右侧第一项是速度场的**显式时间变化率 (Explicit temporal rate)**，第二项是**对流传输项 (Advective transport)**，度量了因状态 $x^b$ 沿轨迹移动而引起的速度场隐式变化。
+其中右侧第一项是速度场的**显式时间变化率 (Explicit temporal rate)**，第二项是**对流传输项 (Advective transport)**，度量了因状态 $x_i$ 沿轨迹移动而引起的速度场隐式变化。
 
-我们将块 $b$ 在时刻 $t$ 的**局部轨迹曲率 (Local Trajectory Curvature)** 定义为该全导数的范数：
+我们将 token $i$ 在时刻 $t$ 的**局部轨迹曲率 (Local Trajectory Curvature)** 定义为该全导数的范数：
 
 $$
-\kappa_b(t) \triangleq \left\| \frac{d v_\theta^{(b)}}{dt}(t) \right\| \tag{3.2}
+\kappa_i(t) \triangleq \left\| \frac{d v_{\theta,i}}{dt}(t) \right\| \tag{3.2}
 $$
 
 **直观含义：**
 
-- $\kappa_b(t) = 0$ ⟹ 速度场在块 $b$ 上恒定，轨迹为直线，**完美直线度**
-- $\kappa_b(t)$ 大 ⟹ 速度场在块 $b$ 上剧烈变化，轨迹弯曲，**直线度低**
+- $\kappa_i(t) = 0$ ⟹ 速度场在 token $i$ 上恒定，轨迹为直线，**完美直线度**
+- $\kappa_i(t)$ 大 ⟹ 速度场在 token $i$ 上剧烈变化，轨迹弯曲，**直线度低**
 
 这与 Rectified Flow 的 "straightness" 概念完全一致：Rectified Flow 的 reflow 操作旨在全局降低 $\kappa$，而我们的方法则利用 $\kappa$ 的**空间异质性**进行局部自适应调度。
 
 ### §3.2 空间局部性假设 (Spatial Locality Assumption)
 
-在 DiT 等具有全局自注意力的架构中，块 $b$ 的速度场严格来说依赖于所有块的状态。因此全导数应展开为：
+在 DiT 等具有全局自注意力的架构中，token $i$ 的速度场严格来说依赖于所有 token 的状态。因此全导数应展开为：
 
 $$
-\frac{d v_\theta^{(b)}}{dt} = \frac{\partial v_\theta^{(b)}}{\partial t} + \sum_{b'} \frac{\partial v_\theta^{(b)}}{\partial x^{(b')}} \cdot \frac{d x^{(b')}}{dt} \tag{3.3}
+\frac{d v_{\theta,i}}{dt} = \frac{\partial v_{\theta,i}}{\partial t} + \sum_{j \in \Omega} \frac{\partial v_{\theta,i}}{\partial x_j} \cdot \frac{d x_j}{dt} \tag{3.3}
 $$
 
 为使理论在块级别闭环，我们引入空间局部性假设：
 
-> **假设 1 (Spatial Locality)：** 在时间步 $\Delta t$ 内，跨块雅可比项 $\partial v_\theta^{(b)} / \partial x^{(b')}$（$b' \neq b$）相对于同块自雅可比项可忽略，从而
+> **假设 1 (Spatial Locality)：** 在时间步 $\Delta t$ 内，跨 token 雅可比项 $\partial v_{\theta,i} / \partial x_j$（$j \neq i$）相对于自项可忽略，从而
 >
-> $$\frac{d v_\theta^{(b)}}{dt} \approx \frac{\partial v_\theta^{(b)}}{\partial t} + \left(\nabla_{x^b} v_\theta^{(b)}\right) \cdot v_\theta^{(b)}$$
+> $$\frac{d v_{\theta,i}}{dt} \approx \frac{\partial v_{\theta,i}}{\partial t} + \left(\nabla_{x_i} v_{\theta,i}\right) \cdot v_{\theta,i}$$
 
 该假设的合理性依据：
 
 - **(a)** 多项研究表明 DiT 的 self-attention score 表现出较强的空间局部性和稀疏性，远距离 token 间的注意力权重衰减迅速。
-- **(b)** 在短时间窗口 $\Delta t$ 内，跨块状态变化为 $O(\Delta t)$ 量级，其对本块速度场的扰动为二阶小量 $O(\Delta t^2)$，在一阶分析中自然消去。
-- **(c)** 实验验证：将跨块雅可比冻结与否对比，误差差异在统计意义上不显著。
+- **(b)** 在短时间窗口 $\Delta t$ 内，跨 token 状态变化为 $O(\Delta t)$ 量级，其对当前位置速度场的扰动为二阶小量 $O(\Delta t^2)$，在一阶分析中自然消去。
+- **(c)** 实验验证：将跨位置雅可比冻结与否对比，误差差异在统计意义上不显著。
 
-> **注：** 严格而言，式 (3.3) 中的完整全导数可以通过向量-雅可比积 (VJP) 直接计算，不存在计算上的障碍。空间局部性假设的目的是简化理论分析，使 $\kappa_b(t)$ 成为仅依赖块 $b$ 本身状态的局部量，从而支撑后续的独立块调度。
+> **注：** 严格而言，式 (3.3) 中的完整全导数可以通过向量-雅可比积 (VJP) 直接计算，不存在计算上的障碍。空间局部性假设的目的是简化理论分析，使 $\kappa_i(t)$ 成为仅依赖 token $i$ 本身状态的局部量；在后续的 `§4.3-§4.4` 中，我们再将 token-level 曲率聚合为 block-level 调度量。
 
 ### §3.3 利用三角不等式建立可计算上界
 
 对式 (3.2) 应用三角不等式：
 
 $$
-\kappa_b(t) \le \left\|\frac{\partial v_\theta}{\partial t}\right\| + \left\|\nabla_{x^b} v_\theta\right\| \cdot \left\|v_\theta\right\| \tag{3.4}
+\kappa_i(t) \le \left\|\frac{\partial v_{\theta,i}}{\partial t}\right\| + \left\|\nabla_{x_i} v_{\theta,i}\right\| \cdot \left\|v_{\theta,i}\right\| \tag{3.4}
 $$
 
 右侧的三个量均可在推理过程中估计：
@@ -112,48 +128,48 @@ $$
 
 ## §4 曲率的可观测代理：终点预测漂移
 
-§3 定义了局部曲率 $\kappa_b(t)$ 作为理论核心量。然而在实际推理中，精确计算 $\kappa_b(t)$ 需要额外的雅可比信息，开销较大。本节推导一个**无需额外前向传播即可观测的代理指标 (Observable Proxy)**，并证明它与 $\kappa_b(t)$ 之间存在严格的比例关系。
+§3 定义了 token-level 局部曲率 $\kappa_i(t)$ 作为理论核心量。然而在实际推理中，精确计算 $\kappa_i(t)$ 需要额外的雅可比信息，开销较大。本节推导一个**无需额外前向传播即可观测的代理指标 (Observable Proxy)**，并证明它与 $\kappa_i(t)$ 之间存在严格的比例关系。
 
 ### §4.1 单步终点预测 (One-step Endpoint Prediction)
 
 FM 的推理过程中，在任意时刻 $t$ 可以做一个"如果从此刻开始速度场不变，最终会到达哪里"的估计：
 
 $$
-\hat{x}_1^{(b)}(t) = x^b(t) + (1 - t) \cdot v_\theta(x^b(t), t) \tag{4.1}
+\hat{x}_{1,i}(t) = x_i(t) + (1 - t) \cdot v_{\theta,i}(x(t), t) \tag{4.1}
 $$
 
-这就是从当前状态出发、以当前速度场做一步欧拉外推到 $t=1$ 的终点预测。当轨迹为完美直线时，$\hat{x}_1^{(b)}(t)$ 对所有 $t$ 恒定不变；轨迹越弯曲，不同时刻的终点预测偏差越大。
+这就是从当前状态出发、以当前速度场做一步欧拉外推到 $t=1$ 的终点预测。当轨迹为完美直线时，$\hat{x}_{1,i}(t)$ 对所有 $t$ 恒定不变；轨迹越弯曲，不同时刻的终点预测偏差越大。
 
 ### §4.2 终点预测漂移与曲率的关系
 
 定义相邻步之间的**终点预测漂移 (Endpoint Prediction Drift)**：
 
 $$
-\hat{\delta}^{(b,k)} \triangleq \hat{x}_1^{(b)}(t_k) - \hat{x}_1^{(b)}(t_{k-1}) \tag{4.2}
+\hat{\delta}_{i}^{(k)} \triangleq \hat{x}_{1,i}(t_k) - \hat{x}_{1,i}(t_{k-1}) \tag{4.2}
 $$
 
 利用微分近似：
 
 $$
-\hat{\delta}^{(b,k)} \approx \frac{d\hat{x}_1^{(b)}}{dt}\bigg|_{t=t_k} \cdot \Delta t \tag{4.3}
+\hat{\delta}_{i}^{(k)} \approx \frac{d\hat{x}_{1,i}}{dt}\bigg|_{t=t_k} \cdot \Delta t \tag{4.3}
 $$
 
 对式 (4.1) 求全时间导数：
 
 $$
-\frac{d\hat{x}_1^{(b)}}{dt} = \frac{dx^b}{dt} + (1-t) \cdot \frac{dv_\theta}{dt} - v_\theta = v_\theta + (1-t) \cdot \frac{dv_\theta}{dt} - v_\theta = (1-t) \cdot \frac{dv_\theta}{dt} \tag{4.4}
+\frac{d\hat{x}_{1,i}}{dt} = \frac{dx_i}{dt} + (1-t) \cdot \frac{dv_{\theta,i}}{dt} - v_{\theta,i} = v_{\theta,i} + (1-t) \cdot \frac{dv_{\theta,i}}{dt} - v_{\theta,i} = (1-t) \cdot \frac{dv_{\theta,i}}{dt} \tag{4.4}
 $$
 
 因此：
 
 $$
-\hat{\delta}^{(b,k)} \approx (1 - t_k) \cdot \frac{dv_\theta^{(b)}}{dt}\bigg|_{t_k} \cdot \Delta t \tag{4.5}
+\hat{\delta}_{i}^{(k)} \approx (1 - t_k) \cdot \frac{dv_{\theta,i}}{dt}\bigg|_{t_k} \cdot \Delta t \tag{4.5}
 $$
 
 取范数：
 
 $$
-\boxed{\;\left\|\hat{\delta}^{(b,k)}\right\| \approx \kappa_b(t_k) \cdot (1 - t_k) \cdot \Delta t\;} \tag{4.6}
+\boxed{\;\left\|\hat{\delta}_{i}^{(k)}\right\| \approx \kappa_i(t_k) \cdot (1 - t_k) \cdot \Delta t\;} \tag{4.6}
 $$
 
 这揭示了**终点预测漂移与局部曲率之间的严格比例关系**：
@@ -162,22 +178,84 @@ $$
 \text{终点预测漂移} \;\propto\; \text{局部曲率} \;\times\; \text{剩余时间} \;\times\; \text{步长}
 $$
 
-因此，$\left\|\hat{\delta}^{(b,k)}\right\| / \big((1 - t_k)\,\Delta t\big)$ 可以作为 $\kappa_b(t_k)$ 的无额外开销的实时估计量——它仅需两次已有的速度场评估结果。
+因此，$\left\|\hat{\delta}_{i}^{(k)}\right\| / \big((1 - t_k)\,\Delta t\big)$ 可以作为 $\kappa_i(t_k)$ 的无额外开销的实时估计量——它仅需两次已有的速度场评估结果。
 
-### §4.3 Blockwise Straightness Score
+### §4.3 Cache Granularity 设计：全局 Block Size 搜索
 
-为了提供一个归一化的、跨时刻可比较的指标，我们定义块 $b$ 在时刻 $t_k$ 的**直线度分数 (Straightness Score)**：
+实现中，monitor 输出的并不是直接可调度的 block 曲率，而是 token-space 曲率图
 
 $$
-S_b(t_k) \triangleq 1 - \frac{\left\|\hat{\delta}^{(b,k)}\right\|}{(1 - t_k) \cdot \left\|v_\theta\right\| \cdot \Delta t} \tag{4.7}
+\kappa \in \mathbb{R}^{F_t \times H_t \times W_t}
 $$
 
-其中分母中的 $\left\|v_\theta\right\|$ 提供尺度归一化。
+随后，partitioner 在候选集合
 
-- $S_b \approx 1$ ⟹ 轨迹近似直线，曲率低，可以安全跳步
-- $S_b \approx 0$ ⟹ 轨迹弯曲剧烈，曲率高，需要密集更新
+$$
+\mathcal{B} = \{(b_f,b_h,b_w)\}
+$$
 
-> **注：** 在实际实现中，直接使用 $\kappa_b$ 的估计值或 $\|\hat{\delta}\|$ 的原始值已经足够，$S_b$ 仅在可视化和跨实验比较时提供便利。后续理论推导统一使用 $\kappa_b$。
+上搜索一个全局 block size。对任意候选 $\mathbf{b} \in \mathcal{B}$，定义其诱导的均匀分区为
+
+$$
+\mathcal{P}(\mathbf{b}) = \{B_j(\mathbf{b})\}_{j=1}^{N(\mathbf{b})}
+$$
+
+其中每个 block 都是 token 网格上的轴对齐长方体，边界块允许尺寸小于 $(b_f,b_h,b_w)$。
+
+我们的设计原则不是"让块尽可能细"，而是**让同一 block 内的曲率尽可能一致，同时保持 block 尽可能大**，以减少调度与 cache 管理开销。为此，对候选 $\mathbf{b}$ 的每个 block 定义块内离散度
+
+$$
+\mathrm{cv}_j(\mathbf{b}) \triangleq \frac{\mathrm{Std}\!\left(\{\kappa_i\}_{i \in B_j(\mathbf{b})}\right)}{\mathrm{Mean}\!\left(\{\kappa_i\}_{i \in B_j(\mathbf{b})}\right) + \varepsilon} \tag{4.7}
+$$
+
+并聚合得到
+
+$$
+\mu_{\mathrm{cv}}(\mathbf{b}) \triangleq \frac{1}{N(\mathbf{b})}\sum_{j=1}^{N(\mathbf{b})} \mathrm{cv}_j(\mathbf{b}), \qquad
+q_{0.9,\mathrm{cv}}(\mathbf{b}) \triangleq \mathrm{Quantile}_{0.9}\!\left(\{\mathrm{cv}_j(\mathbf{b})\}_{j=1}^{N(\mathbf{b})}\right) \tag{4.8}
+$$
+
+实现中的选择规则可形式化为：
+
+$$
+\mathbf{b}^* =
+\begin{cases}
+\displaystyle \arg\max_{\mathbf{b} \in \mathcal{F}} \;\mathrm{Vol}(\mathbf{b}),
+& \mathcal{F} \neq \varnothing \\[6pt]
+\displaystyle \arg\min_{\mathbf{b} \in \mathcal{B}}
+\Big(q_{0.9,\mathrm{cv}}(\mathbf{b}),\; \mu_{\mathrm{cv}}(\mathbf{b}),\; -\mathrm{Vol}(\mathbf{b})\Big),
+& \mathcal{F} = \varnothing
+\end{cases} \tag{4.9}
+$$
+
+其中可行集合
+
+$$
+\mathcal{F} \triangleq \left\{
+\mathbf{b} \in \mathcal{B}\; \middle|\;
+q_{0.9,\mathrm{cv}}(\mathbf{b}) \le \gamma,\;
+n_{\min} \le \mathrm{Vol}(\mathbf{b}) \le n_{\max}
+\right\}
+$$
+
+由块内一致性阈值 $\gamma$ 和 token 数约束共同定义。
+
+该规则对应实现中的两个关键偏好：
+
+- 若存在"大多数块内部已足够一致"的候选，则优先选择**最大的** block size；
+- 若所有候选都不够理想，则选择 **p90-CV 最小** 的方案，并以 mean-CV 和 block 体积作 tie-break。
+
+因此，Cubic 的 partitioner 实际优化的是**cache granularity**，而不是对单个 token 单独赋予更新周期。
+
+### §4.4 Block Representative Curvature
+
+在确定分区 $\mathcal{P}(\mathbf{b}^*)$ 后，optimizer 不直接使用块内均值，而是为每个 block 定义一个偏保守的代表曲率：
+
+$$
+\kappa_b \triangleq \mathrm{Quantile}_{q}\!\left(\{\kappa_i\}_{i \in B_b}\right), \qquad q \approx 0.9 \tag{4.10}
+$$
+
+相比均值聚合，分位数聚合更能抑制"大块中少量高曲率 token 被平均掉"的问题，从而减少过度跳步的风险。直观上，$\kappa_b$ 更接近该 block 的"risk-aware curvature"。
 
 ---
 
@@ -407,6 +485,52 @@ $$
 
 ---
 
+### §7.5 Selective Token-wise DiT Forward
+
+当分区 $\mathcal{P}$ 与 block interval $\{\tau_b\}$ 确定后，第 $k$ 个 selective step 的 active block 集合为
+
+$$
+\mathcal{A}_k \triangleq \{b \in \mathcal{P} \mid s_k \bmod \tau_b = 0\} \tag{7.7}
+$$
+
+其中 $s_k$ 是 selective phase 内的局部步编号。对应的 active / frozen token 集合为
+
+$$
+\Omega_k^{\mathrm{act}} \triangleq \bigcup_{b \in \mathcal{A}_k} B_b, \qquad
+\Omega_k^{\mathrm{frz}} \triangleq \Omega \setminus \Omega_k^{\mathrm{act}} \tag{7.8}
+$$
+
+在 transformer 第 $\ell$ 层，Cubic 只对 active token 重新计算 query，并用 active token 的新 K/V 更新 per-layer cache；frozen token 则直接复用历史 cache：
+
+$$
+Q_\ell^{\mathrm{act}} = W_\ell^Q h_\ell(\Omega_k^{\mathrm{act}}), \qquad
+K_\ell^{\mathrm{act}} = W_\ell^K h_\ell(\Omega_k^{\mathrm{act}}), \qquad
+V_\ell^{\mathrm{act}} = W_\ell^V h_\ell(\Omega_k^{\mathrm{act}}) \tag{7.9}
+$$
+
+$$
+K_\ell^{\mathrm{full}} = \mathrm{Scatter}\!\left(K_\ell^{\mathrm{act}}, K_{\ell,\mathrm{cache}}^{\mathrm{frz}}\right), \qquad
+V_\ell^{\mathrm{full}} = \mathrm{Scatter}\!\left(V_\ell^{\mathrm{act}}, V_{\ell,\mathrm{cache}}^{\mathrm{frz}}\right) \tag{7.10}
+$$
+
+随后 attention 仅为 active token 产出输出：
+
+$$
+Y_\ell^{\mathrm{act}} = \mathrm{Attn}\!\left(Q_\ell^{\mathrm{act}}, K_\ell^{\mathrm{full}}, V_\ell^{\mathrm{full}}\right) \tag{7.11}
+$$
+
+并且 FFN / head 也仅在 active token 上执行；冻结 token 的层输出或最终速度预测从 output cache 中直接取回。于是一步 selective forward 的输出可写成
+
+$$
+v_k(\Omega) =
+\mathrm{Merge}\!\left(
+v_k^{\mathrm{act}}(\Omega_k^{\mathrm{act}}),
+v_{k-1,\mathrm{cache}}(\Omega_k^{\mathrm{frz}})
+\right) \tag{7.12}
+$$
+
+实际工程中，当 KV cache 或 output cache 不可用时，系统回退到 full forward 以刷新缓存。这一点保证了 selective path 的数值稳定性，也使理论中的 ZOH 近似在实现上具备明确的 bootstrap / refresh 机制。
+
 ## §8 总结：理论框架的逻辑链条
 
 ```
@@ -419,13 +543,16 @@ $$
 3. ZOH（跳步/缓存复用）的局部截断误差 ∝ κ_b · τ²Δt²
    曲率直接决定了步长容忍度
                               ↓
-4. 给定总计算预算（加速比 ρ），最优调度为
+4. Anchor step 上先搜索全局 block size，使块内曲率尽量一致且块尽量大
+   再以 block 分位数曲率作为风险感知代表量
+                              ↓
+5. 给定总计算预算（加速比 ρ），最优调度为
    τ_b* ∝ κ_b^{-2/5}
    曲率低（直）的块少算，曲率高（弯）的块多算
                               ↓
-5. 实现为在线自适应算法：
+6. 实现为在线自适应算法：
    前期全量计算并估计各块 κ_b
-   中期按 κ_b 分配更新频率
+   anchor 时重估粒度与 τ_b，中期间 selective token forward
    末期恢复全量计算保证最终质量
 ```
 
@@ -462,6 +589,7 @@ DeepCache (Ma et al., 2023) 利用相邻时间步的特征相似性进行缓存�
 理论预测的关键可校准参数：
 
 - **$\beta$ 的取值：** 理论值 4，建议在 $\{2, 3, 4, 5\}$ 中搜索，以 FID/LPIPS vs. 加速比的帕累托前沿为判据。
-- **分块粒度 $(f, h, w)$：** 影响空间局部性假设的精度。块太大 → 块内曲率异质性高，调度粗糙；块太小 → 假设更好，但调度开销增加。建议初始值：$h = w = H/4$ 或 $H/8$。
+- **候选 block size 集合 $\mathcal{B}$：** 影响 partitioner 的搜索空间。实现中更合理的调参方式不是手工固定某个 $(f,h,w)$，而是调节 `min_block_size / max_block_size / cv_threshold / token-count` 约束，让系统在候选中自动选择全局 block size。
+- **块代表曲率的聚合方式：** 当前实现采用 block 内高分位数（默认 q=0.9），比均值更保守。若希望更激进的加速，可尝试降低 q；若希望降低局部 artifact 风险，可提高 q。
 - **加速区间 $[t_a, t_b]$：** 中期稳定区间的边界。建议通过观察 $\kappa_b(t)$ 的时间曲线确定，典型值 $t_a \approx 0.15$，$t_b \approx 0.85$。
 - **$\kappa_b$ 的估计窗口：** 用多少步的历史来估计中期 $\kappa_b$。建议取 $t < t_a$ 阶段的 median 或 exponential moving average。
