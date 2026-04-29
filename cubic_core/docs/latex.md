@@ -68,9 +68,9 @@ This design prevents a few high-curvature tokens from being drowned out by the b
 \subsection{Budget-Constrained Interval Optimization}
 \label{sec:optimizer}
 
-After obtaining a representative curvature for each block, \cubic determines how long each block may safely reuse cached outputs. The key insight is that reusing a cached block output for $\tau_b$ steps is equivalent to applying a zero-order hold to the local velocity field over a short time window. Our theoretical analysis in the Appendix shows that the corresponding local state error satisfies
+After obtaining a representative curvature for each block, \cubic determines how long each block may safely reuse cached outputs. The key insight is that reusing a cached block output for $\tau_b$ steps is equivalent to applying a zero-order hold to the local velocity field over a short time window. To avoid overloading the symbol used for endpoint-prediction drift, we denote the resulting ZOH truncation error by $e_b$. Our theoretical analysis in the Appendix shows that the corresponding local state error satisfies
 \begin{equation}
-    \|\delta_{\tau_b}\|
+    \|e_{\tau_b}^{(b)}\|
     \lesssim
     \frac{1}{2}\,\kappa_b\,\tau_b^2\,\Delta t^2.
 \end{equation}
@@ -80,7 +80,14 @@ We formalize interval allocation as a budget-constrained optimization problem. L
 \begin{equation}
     \ell_b(\tau_b) \propto \kappa_b^\alpha \tau_b^\beta,
 \end{equation}
-and minimize the total error under an average update-rate constraint. The resulting closed-form optimum satisfies
+and minimize the total error under an average update-rate constraint:
+\begin{equation}
+    \min_{\tau_b \ge 1}\; \sum_{b=1}^{B} \kappa_b^\alpha \tau_b^\beta
+    \qquad
+    \text{s.t.}\quad
+    \frac{1}{B}\sum_{b=1}^{B}\frac{1}{\tau_b} = \frac{1}{\rho}.
+\end{equation}
+The resulting closed-form optimum satisfies
 \begin{equation}
     \tau_b^\star \propto \kappa_b^{-\alpha/(\beta+1)}.
 \end{equation}

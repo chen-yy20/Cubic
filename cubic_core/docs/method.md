@@ -36,7 +36,7 @@ Rectified Flow 的核心特性是：若速度场沿轨迹几乎不变，则生�
 
 ### 2.1 Motivation
 
-我们希望找到一个无需额外前向传播、但能反映局部轨迹弯曲程度的在线指标。关键观察是：如果某个 token 的轨迹是直的，那么“以当前速度场直接外推到终点”的预测在相邻时间步之间应几乎不变；反之，若轨迹弯曲，则这一终点预测会持续漂移。
+我们希望找到一个无需额外前向传播、但能反映局部轨迹弯曲程度的在线指标。关键观察是：如果某个 token 的轨迹是直的，那么“以当前速度场直接外推到终点”的预测在相邻两次观测之间应几乎不变；反之，若轨迹弯曲，则这一终点预测会持续漂移。
 
 ### 2.2 Endpoint Prediction Drift
 
@@ -113,10 +113,10 @@ $$
 
 ### 4.1 Error Model
 
-一旦某个 block 在当前步完成刷新，我们在接下来若干步内复用其缓存输出，此处应该强调insight：等价于在局部时间窗口上对速度场应用 zero-order hold。对于 block $b$，若其曲率为 $\kappa_b$，跳过 $\tau_b$ 步带来的局部状态误差满足
+一旦某个 block 在当前步完成刷新，我们在接下来若干步内复用其缓存输出，此处应该强调insight：等价于在局部时间窗口上对速度场应用 zero-order hold。为避免与前文的终点预测漂移 $\hat{\delta}_{i}^{(m)}$ 混淆，我们将 ZOH 引入的局部状态误差记为 $e_b$。对于 block $b$，若其曲率为 $\kappa_b$，跳过 $\tau_b$ 步带来的局部状态误差满足
 
 $$
-\|\delta_{\tau_b}\|
+\|e_{\tau_b}^{(b)}\|
 \;\lesssim\;
 \frac{1}{2}\,\kappa_b\,\tau_b^2\,\Delta t^2.
 $$
@@ -131,7 +131,16 @@ $$
 \ell_b(\tau_b) \propto \kappa_b^\alpha \tau_b^\beta,
 $$
 
-并在平均更新率受限的条件下最小化总误差。其闭式最优解满足
+并在平均更新率受限的条件下最小化总误差，即
+
+$$
+\min_{\tau_b \ge 1}\; \sum_{b=1}^{B} \kappa_b^\alpha \tau_b^\beta
+\qquad
+\text{s.t.}\quad
+\frac{1}{B}\sum_{b=1}^{B}\frac{1}{\tau_b} = \frac{1}{\rho}.
+$$
+
+其闭式最优解满足
 
 $$
 \tau_b^\star \propto \kappa_b^{-\alpha/(\beta+1)}.

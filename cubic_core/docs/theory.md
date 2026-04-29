@@ -142,16 +142,16 @@ $$
 
 ### §4.2 终点预测漂移与曲率的关系
 
-定义相邻步之间的**终点预测漂移 (Endpoint Prediction Drift)**：
+实现中，monitor 只在 anchor step 上更新，因此我们实际比较的是相邻两次 anchor observation 之间的**终点预测漂移 (Endpoint Prediction Drift)**。记 anchor 序列为 $\{t_{a_m}\}_{m=1}^{M}$，则
 
 $$
-\hat{\delta}_{i}^{(k)} \triangleq \hat{x}_{1,i}(t_k) - \hat{x}_{1,i}(t_{k-1}) \tag{4.2}
+\hat{\delta}_{i}^{(m)} \triangleq \hat{x}_{1,i}(t_{a_m}) - \hat{x}_{1,i}(t_{a_{m-1}}) \tag{4.2}
 $$
 
 利用微分近似：
 
 $$
-\hat{\delta}_{i}^{(k)} \approx \frac{d\hat{x}_{1,i}}{dt}\bigg|_{t=t_k} \cdot \Delta t \tag{4.3}
+\hat{\delta}_{i}^{(m)} \approx \frac{d\hat{x}_{1,i}}{dt}\bigg|_{t=t_{a_m}} \cdot \Delta t_{a_m} \tag{4.3}
 $$
 
 对式 (4.1) 求全时间导数：
@@ -163,13 +163,13 @@ $$
 因此：
 
 $$
-\hat{\delta}_{i}^{(k)} \approx (1 - t_k) \cdot \frac{dv_{\theta,i}}{dt}\bigg|_{t_k} \cdot \Delta t \tag{4.5}
+\hat{\delta}_{i}^{(m)} \approx (1 - t_{a_m}) \cdot \frac{dv_{\theta,i}}{dt}\bigg|_{t_{a_m}} \cdot \Delta t_{a_m} \tag{4.5}
 $$
 
 取范数：
 
 $$
-\boxed{\;\left\|\hat{\delta}_{i}^{(k)}\right\| \approx \kappa_i(t_k) \cdot (1 - t_k) \cdot \Delta t\;} \tag{4.6}
+\boxed{\;\left\|\hat{\delta}_{i}^{(m)}\right\| \approx \kappa_i(t_{a_m}) \cdot (1 - t_{a_m}) \cdot \Delta t_{a_m}\;} \tag{4.6}
 $$
 
 这揭示了**终点预测漂移与局部曲率之间的严格比例关系**：
@@ -178,7 +178,7 @@ $$
 \text{终点预测漂移} \;\propto\; \text{局部曲率} \;\times\; \text{剩余时间} \;\times\; \text{步长}
 $$
 
-因此，$\left\|\hat{\delta}_{i}^{(k)}\right\| / \big((1 - t_k)\,\Delta t\big)$ 可以作为 $\kappa_i(t_k)$ 的无额外开销的实时估计量——它仅需两次已有的速度场评估结果。
+其中 $\Delta t_{a_m} \triangleq |t_{a_m} - t_{a_{m-1}}|$。因此，$\left\|\hat{\delta}_{i}^{(m)}\right\| / \big((1 - t_{a_m})\,\Delta t_{a_m}\big)$ 可以作为 $\kappa_i(t_{a_m})$ 的无额外开销的实时估计量——它仅需两次已有的速度场评估结果。
 
 ### §4.3 Cache Granularity 设计：全局 Block Size 搜索
 
@@ -285,10 +285,16 @@ $$
 
 ### §5.2 局部截断误差推导
 
-定义状态误差 $\delta(t) \triangleq \tilde{x}(t) - x(t)$，初始条件 $\delta(t_0) = 0$。误差演化方程：
+为避免与前文的终点预测漂移 $\hat{\delta}_{i}^{(m)}$ 混淆，我们将 ZOH 引入的状态误差记为 $e(t)$。定义
 
 $$
-\frac{d\delta}{dt} = v_0 - v_\theta(x(t),\, t) \tag{5.1}
+e(t) \triangleq \tilde{x}(t) - x(t), \qquad e(t_0)=0
+$$
+
+则误差演化方程为：
+
+$$
+\frac{de}{dt} = v_0 - v_\theta(x(t),\, t) \tag{5.1}
 $$
 
 对右侧，利用真实轨道上速度场全导数的积分形式：
@@ -312,13 +318,13 @@ $$
 对误差演化方程 (5.1) 积分：
 
 $$
-\|\delta(t)\| \le \int_{t_0}^{t} \kappa_b \cdot (s - t_0)\, ds = \frac{1}{2}\,\kappa_b\,(t - t_0)^2 \tag{5.5}
+\|e(t)\| \le \int_{t_0}^{t} \kappa_b \cdot (s - t_0)\, ds = \frac{1}{2}\,\kappa_b\,(t - t_0)^2 \tag{5.5}
 $$
 
 令 $t = t_0 + \tau\Delta t$，得到跳过 $\tau$ 步后的**局部截断误差上界**：
 
 $$
-\boxed{\;\|\delta_\tau\| \le \frac{1}{2}\,\kappa_b \cdot \tau^2 \Delta t^2\;} \tag{5.6}
+\boxed{\;\|e_\tau\| \le \frac{1}{2}\,\kappa_b \cdot \tau^2 \Delta t^2\;} \tag{5.6}
 $$
 
 **物理直觉：**
@@ -334,19 +340,19 @@ $$
 若速度场满足空间 Lipschitz 条件（常数 $L$）：
 
 $$
-\|v_\theta(\tilde{x},\, t) - v_\theta(x,\, t)\| \le L\,\|\delta(t)\|
+\|v_\theta(\tilde{x},\, t) - v_\theta(x,\, t)\| \le L\,\|e(t)\|
 $$
 
 则更精确的误差演化为：
 
 $$
-\frac{d\|\delta\|}{dt} \le \kappa_b\,(t - t_0) + L\,\|\delta(t)\|
+\frac{d\|e\|}{dt} \le \kappa_b\,(t - t_0) + L\,\|e(t)\|
 $$
 
 由 Grönwall 不等式：
 
 $$
-\|\delta(t)\| \le \frac{\kappa_b}{L}\left[e^{L(t - t_0)} - 1 - L(t - t_0)\right]
+\|e(t)\| \le \frac{\kappa_b}{L}\left[e^{L(t - t_0)} - 1 - L(t - t_0)\right]
 $$
 
 当 $L \cdot \tau\Delta t \ll 1$ 时（短窗口），上式退化为 $\frac{1}{2}\kappa_b(\tau\Delta t)^2$，与 (5.6) 一致。在我们关注的加速比范围内（$\tau$ 通常为 2–8），该条件成立，因此 (5.6) 作为工作误差界已足够精确。
@@ -359,9 +365,9 @@ $$
 - **中期** ($t \in [0.2, 0.8]$)：整体轮廓已确定，细节逐步填充，$\kappa_b$ 趋于稳定——这是加速的主要作用区间
 - **末期** ($t \approx 1$)：最终细节修饰，$\kappa_b$ 可能再次升高
 
-> **假设 2 (Curvature Stationarity)：** 在中期区间 $[t_a, t_b]$ 内，各块的曲率 $\kappa_b$ 可近似视为与时间无关的常数。该常数可由前期（如 $t < t_a$）的速度场评估历史估计得到：
+> **假设 2 (Curvature Stationarity)：** 在中期区间 $[t_a, t_b]$ 内，各块的曲率 $\kappa_b$ 可近似视为与时间无关的常数。该常数可由前期的 anchor 观测历史估计得到：
 >
-> $$\kappa_b \approx \text{median}_k \left\{ \frac{\|\hat{\delta}^{(b,k)}\|}{(1 - t_k)\,\Delta t} \right\}, \quad t_k < t_a$$
+> $$\kappa_b \approx \mathrm{median}_m \left\{ \mathrm{Agg}_b\!\left(\frac{\|\hat{\delta}_{i}^{(m)}\|}{(1 - t_{a_m})\,\Delta t_{a_m}}\right) \right\}, \quad t_{a_m} < t_a$$
 
 初期和末期保持完整计算（所有块均更新），仅在中期应用自适应调度。
 
@@ -374,7 +380,7 @@ $$
 FM 的训练目标为 MSE 损失，因此我们以状态误差的平方作为代理损失。对块 $b$ 分配跳步间隔 $\tau_b$ 所产生的损失为：
 
 $$
-\ell_b(\tau_b) \triangleq \|\delta_{\tau_b}\|^2 \le \left(\frac{1}{2}\,\kappa_b\,\tau_b^2\,\Delta t^2\right)^2 = \frac{1}{4}\,\kappa_b^2\,\Delta t^4\,\tau_b^4 \tag{6.1}
+\ell_b(\tau_b) \triangleq \|e_{\tau_b}\|^2 \le \left(\frac{1}{2}\,\kappa_b\,\tau_b^2\,\Delta t^2\right)^2 = \frac{1}{4}\,\kappa_b^2\,\Delta t^4\,\tau_b^4 \tag{6.1}
 $$
 
 即：
