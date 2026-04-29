@@ -80,7 +80,8 @@ class CurvatureMonitor:
         use_gpu_agg = bool(getattr(self.config, 'partition_gpu_aggregation', True))
         if use_gpu_agg and curv_map.device.type == 'cuda':
             selected_size = getattr(partition, 'selected_block_size', None)
-            if selected_size is not None:
+            is_uniform = bool(getattr(partition, 'is_uniform', False))
+            if is_uniform and selected_size is not None:
                 quantiles = self._uniform_block_quantiles(curv_map.detach().float(), selected_size, q)
                 out: Dict[int, float] = {}
                 q_list = quantiles.detach().cpu().tolist()

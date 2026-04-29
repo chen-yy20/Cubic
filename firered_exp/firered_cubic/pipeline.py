@@ -447,7 +447,9 @@ class CubicQwenImageEditPlusPipeline(QwenImageEditPlusPipeline):
                 float(cond_complexity_map.float().amax().item()),
             )
             logger.info(
-                "[firered-cond-optimizer] tau(min=%d max=%d mean=%.3f) mean_update_rate=%.6f achieved_speedup=%.3f histogram=%s",
+                "[firered-cond-optimizer] config_tau(min=%d max=%d) assigned_tau(min=%d max=%d mean=%.3f) mean_update_rate=%.6f achieved_speedup=%.3f histogram=%s",
+                int(getattr(self.cond_frequency_optimizer, "tau_min", 1)),
+                int(getattr(self.cond_frequency_optimizer, "tau_max", 10)),
                 cond_frequency_plan.min_interval,
                 cond_frequency_plan.max_interval,
                 cond_frequency_plan.mean_interval,
@@ -700,8 +702,10 @@ class CubicQwenImageEditPlusPipeline(QwenImageEditPlusPipeline):
                                 )
 
                             logger.info(
-                                "[firered-optimizer] step=%d tau(min=%d max=%d mean=%.3f) mean_update_rate=%.6f achieved_speedup=%.3f histogram=%s",
+                                "[firered-optimizer] step=%d config_tau(min=%d max=%d) assigned_tau(min=%d max=%d mean=%.3f) mean_update_rate=%.6f achieved_speedup=%.3f histogram=%s",
                                 i,
+                                int(getattr(self.main_frequency_optimizer, "tau_min", 1)),
+                                int(getattr(self.main_frequency_optimizer, "tau_max", 10)),
                                 frequency_plan.min_interval,
                                 frequency_plan.max_interval,
                                 frequency_plan.mean_interval,

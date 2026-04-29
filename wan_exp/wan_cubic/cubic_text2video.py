@@ -289,9 +289,13 @@ class CubicWanT2V(WanT2V):
                                         selective_step_idx=max(0, step - warmup_steps),
                                     )
                                 if self.rank == 0:
+                                    configured_tau_min = int(getattr(self.frequency_optimizer, 'tau_min', 1))
+                                    configured_tau_max = int(getattr(self.frequency_optimizer, 'tau_max', 10))
                                     logging.info(
-                                        '[wan-optimizer] step=%d tau(min=%d max=%d mean=%.3f) mean_update_rate=%.6f achieved_speedup=%.3f',
+                                        '[wan-optimizer] step=%d config_tau(min=%d max=%d) assigned_tau(min=%d max=%d mean=%.3f) mean_update_rate=%.6f achieved_speedup=%.3f',
                                         step,
+                                        configured_tau_min,
+                                        configured_tau_max,
                                         frequency_plan.min_interval,
                                         frequency_plan.max_interval,
                                         frequency_plan.mean_interval,
@@ -509,4 +513,3 @@ class CubicWanT2V(WanT2V):
             step_plan=self.current_step_plan,
             branch_key=branch_key,
         )
-

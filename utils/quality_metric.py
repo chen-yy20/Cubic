@@ -596,19 +596,32 @@ def infer_origin_path_from_output_dir(generated_path: str, output_dir: Optional[
         candidates = [name]
         # Strip known speed/param suffixes to find the base prompt_id used by ori.
         #   cubic:   _2x / _2.5x
+        #            _a2 / _b4 / _a2_b4
         #   tocache: _fr0.1
         #   pab:     _skip5
         #   jano:    _si2_mi4
         _suffix_patterns = [
             r'_[0-9]+(?:\.[0-9]+)?x$',
+            r'_a[0-9]+(?:\.[0-9]+)?_b[0-9]+(?:\.[0-9]+)?$',
+            r'_a[0-9]+(?:\.[0-9]+)?$',
+            r'_b[0-9]+(?:\.[0-9]+)?$',
             r'_fr[0-9]+(?:\.[0-9]+)?$',
             r'_skip[0-9]+$',
             r'_si[0-9]+_mi[0-9]+$',
         ]
-        for pat in _suffix_patterns:
-            stripped = re.sub(pat, '', name)
-            if stripped and stripped != name:
-                candidates.append(stripped)
+
+        current = name
+        while True:
+            stripped_any = False
+            for pat in _suffix_patterns:
+                stripped = re.sub(pat, '', current)
+                if stripped and stripped != current:
+                    if stripped not in candidates:
+                        candidates.append(stripped)
+                    current = stripped
+                    stripped_any = True
+                    break
+            if not stripped_any:
                 break
         return candidates
 

@@ -13,19 +13,19 @@ class WanSelectiveForwardEngine:
     This engine keeps origin Wan modules unchanged by running a wrapper forward:
     - active tokens: full block compute (self-attn + cross-attn + ffn)
     - frozen tokens: self-attn K/V are reused from cache
-    - output tokens: active outputs update cache, frozen outputs are filled from cache
+    - frozen hidden states reuse cached pre-head residuals (TeaCache-style)
     """
 
     def __init__(self, config):
         self.config = config
         self.k_cache: Dict[Tuple[str, int], torch.Tensor] = {}
         self.v_cache: Dict[Tuple[str, int], torch.Tensor] = {}
-        self.output_cache: Dict[str, torch.Tensor] = {}
+        self.residual_cache: Dict[str, torch.Tensor] = {}
 
     def reset(self):
         self.k_cache.clear()
         self.v_cache.clear()
-        self.output_cache.clear()
+        self.residual_cache.clear()
 
     def forward(
         self,
@@ -144,13 +144,10 @@ class WanSelectiveForwardEngine:
                 layer_idx=layer_idx,
             )
 
-        out_active = model.head(x_active, e)
-
-        out_key = branch_key
-        out_full_cache = self.output_cache.get(out_key)
-        if out_full_cache is None or out_full_cache.size(0) != total_tokens:
+        residual_cache = self.residual_cache.get(branch_key)
+        if residual_cache is None or residual_cache.size(0) != total_tokens:
             logging.info(
-                '[wan-selective] branch=%s output cache invalid; fallback to full forward.',
+                '[wan-selective] branch=%s residual cache invalid; fallback to full forward.',
                 branch_key,
             )
             return self._full_forward_and_refresh_cache(
@@ -165,12 +162,16 @@ class WanSelectiveForwardEngine:
                 branch_key=branch_key,
             )
 
-        out_full = out_full_cache.clone()
-        out_full[active_idx] = out_active[0]
-        self.output_cache[out_key] = out_full.detach()
+        residual_cache = residual_cache.to(x_full.device)
+        hidden_full = x_full[0] + residual_cache
+        hidden_full[active_idx] = x_active[0]
 
-        restored = out_full.unsqueeze(0)
-        denoised = model.unpatchify(restored, grid_sizes)
+        updated_residual = residual_cache.clone()
+        updated_residual[active_idx] = x_active[0] - x_full[0, active_idx]
+        self.residual_cache[branch_key] = updated_residual.detach()
+
+        out_full = model.head(hidden_full.unsqueeze(0), e)[0]
+        denoised = model.unpatchify(out_full.unsqueeze(0), grid_sizes)
         return [u.float() for u in denoised]
 
     def _full_forward_and_refresh_cache(
@@ -204,8 +205,9 @@ class WanSelectiveForwardEngine:
                 layer_idx=layer_idx,
             )
 
+        residual_full = x_active[0] - x_full[0]
+        self.residual_cache[branch_key] = residual_full.detach()
         out_full = model.head(x_active, e)[0]
-        self.output_cache[branch_key] = out_full.detach()
 
         denoised = model.unpatchify(out_full.unsqueeze(0), grid_sizes)
         return [u.float() for u in denoised]
@@ -291,7 +293,7 @@ class WanSelectiveForwardEngine:
         return x_active
 
     def _has_cache(self, model, branch_key: str) -> bool:
-        if branch_key not in self.output_cache:
+        if branch_key not in self.residual_cache:
             return False
         for layer_idx in range(len(model.blocks)):
             if (branch_key, layer_idx) not in self.k_cache:

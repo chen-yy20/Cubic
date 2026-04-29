@@ -27,11 +27,13 @@ init_timer()
 
 PROMPT = 'Two anthropomorphic cats in comfy boxing gear and bright gloves fight intensely on a spotlighted stage.'
 # Cubic optimizer / scheduler knobs
-SPEEDUP = 2
+SPEEDUP =2
 WARMUP = 5
 COOLDOWN = 5
 ANCHOR_INTERVAL = 8
-VISUALIZE = True
+VISUALIZE = False
+alpha = 2
+beta = 4
 
 
 TAG = 'cubic'
@@ -54,7 +56,7 @@ def _resolve_model_defaults(model_path):
 
 def _default_output_dir(model_path):
     _, _, model_id = _resolve_model_defaults(model_path)
-    return f'./results/wan/{model_id}/cubic/{get_prompt_id(PROMPT)}_{SPEEDUP}x'
+    return f'./results/wan/{model_id}/cubic/{get_prompt_id(PROMPT)}_{SPEEDUP}x_a{alpha}_b{beta}'
 
 rank = int(os.getenv('RANK', 0))
 world_size = int(os.getenv('WORLD_SIZE', 1))
@@ -275,6 +277,8 @@ def generate(args):
     cfg.warmup_fraction = max(0.0, min(1.0, float(WARMUP) / float(total_steps)))
     cfg.cooldown_fraction = max(0.0, min(1.0, float(COOLDOWN) / float(total_steps)))
     cfg.anchor_interval = max(1, int(ANCHOR_INTERVAL))
+    cfg.alpha = float(alpha)
+    cfg.beta = float(beta)
 
     logging.info(f'Generation job args: {args}')
     logging.info(f'Generation model config: {cfg}')

@@ -90,6 +90,8 @@ class Partition:
     Wt: int  # Token grid width
     level_counts: Optional[Dict[int, int]] = None
     selected_block_size: Optional[tuple[int, int, int]] = None
+    is_uniform: bool = False
+    partition_mode: str = "uniform"
 
     def __len__(self) -> int:
         return len(self.blocks)
@@ -110,8 +112,7 @@ class Partition:
 
     def validate(self) -> None:
         """Verify partition covers all tokens with no overlaps."""
-        # For spatial partitions, validate non-overlapping coverage
-        total_coverage = 0
+        occupancy = torch.zeros((self.Ft, self.Ht, self.Wt), dtype=torch.bool)
         for block in self.blocks:
             if block.f_start < 0 or block.h_start < 0 or block.w_start < 0:
                 raise ValueError(f"Block {block.block_id} has negative start index")
@@ -119,11 +120,19 @@ class Partition:
                 raise ValueError(f"Block {block.block_id} exceeds grid bounds")
             if block.f_end <= block.f_start or block.h_end <= block.h_start or block.w_end <= block.w_start:
                 raise ValueError(f"Block {block.block_id} has zero or negative size")
-            total_coverage += block.token_count
+            region = occupancy[
+                block.f_start:block.f_end,
+                block.h_start:block.h_end,
+                block.w_start:block.w_end,
+            ]
+            if bool(region.any()):
+                raise ValueError(f"Block {block.block_id} overlaps with an existing block")
+            region.fill_(True)
 
-        if total_coverage != self.total_tokens:
+        covered = int(occupancy.sum().item())
+        if covered != self.total_tokens:
             raise ValueError(
-                f"Partition incomplete: covered {total_coverage} tokens, "
+                f"Partition incomplete: covered {covered} tokens, "
                 f"expected {self.total_tokens}"
             )
 

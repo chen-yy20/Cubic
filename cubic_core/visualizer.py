@@ -39,42 +39,50 @@ class PartitionVisualizer:
         file_suffix: str | None = None,
         block_value_label: str = 'tau',
     ) -> Dict[str, str]:
-        vis_dir = os.path.join(output_dir, 'partition_vis')
-        os.makedirs(vis_dir, exist_ok=True)
+        if not hasattr(self, 'history_by_dir'):
+            self.history_by_dir = {}
+        os.makedirs(output_dir, exist_ok=True)
+        if output_dir not in self.history_by_dir:
+            self.history_by_dir[output_dir] = []
+            
+        self.history_by_dir[output_dir].append({
+            'partition': partition,
+            'curvature_map': curvature_map.cpu(),
+            'block_curvatures': block_curvatures,
+            'block_intervals': block_intervals,
+            'step_idx': step_idx,
+            'block_value_label': block_value_label,
+        })
 
         suffix = ''
         if file_suffix:
             safe_suffix = str(file_suffix).replace(os.sep, '_').replace(' ', '_')
             suffix = f'_{safe_suffix}'
 
-        summary_text = self._build_summary_text(
-            partition=partition,
-            block_curvatures=block_curvatures,
-            block_intervals=block_intervals,
-            step_idx=step_idx,
-            block_value_label=block_value_label,
-        )
-        summary_path = os.path.join(vis_dir, f'step_{step_idx:04d}_partition_summary{suffix}.txt')
+        summary_path = os.path.join(output_dir, f'partition_summary{suffix}.txt')
         with open(summary_path, 'w', encoding='utf-8') as f:
-            f.write(summary_text)
+            for rec in self.history_by_dir[output_dir]:
+                summary_text = self._build_summary_text(
+                    partition=rec['partition'],
+                    block_curvatures=rec['block_curvatures'],
+                    block_intervals=rec['block_intervals'],
+                    step_idx=rec['step_idx'],
+                    block_value_label=rec['block_value_label'],
+                )
+                f.write(summary_text + "\n========================================\n\n")
 
-        frame_strip_path = os.path.join(vis_dir, f'step_{step_idx:04d}_frame_strip{suffix}.png')
-        frame_strip_frames = self._save_frame_strip(
-            partition=partition,
-            curvature_map=curvature_map,
-            block_curvatures=block_curvatures,
-            block_intervals=block_intervals,
-            step_idx=step_idx,
+        frame_strip_path = os.path.join(output_dir, f'partition_vis{suffix}.png')
+        frame_strip_frames = self._save_combined_frame_strip(
+            history=self.history_by_dir[output_dir],
             save_path=frame_strip_path,
             max_frames=max_frames,
-            block_value_label=block_value_label,
         )
 
         return {
             'summary_path': summary_path,
             'frame_strip_path': frame_strip_path,
             'frame_strip_frames': ','.join(str(idx) for idx in frame_strip_frames),
-            'summary_text': summary_text,
+            'summary_text': "Written to combined summary file.",
         }
 
     def _build_summary_text(
@@ -98,6 +106,8 @@ class PartitionVisualizer:
 
         lines: List[str] = []
         lines.append(f'step={step_idx}')
+        lines.append(f'partition_mode={getattr(partition, "partition_mode", "unknown")}')
+        lines.append(f'is_uniform={bool(getattr(partition, "is_uniform", False))}')
         lines.append(f'selected_block_size={partition.selected_block_size}')
         lines.append(f'total_blocks={len(blocks)}')
         lines.append(f'total_tokens={partition.total_tokens}')
@@ -108,10 +118,33 @@ class PartitionVisualizer:
         lines.append('curvature_stats=' + self._format_stats(curvatures, scientific=True))
 
         if intervals:
+            configured_tau_min = int(getattr(self.config, 'tau_min', 1))
+            configured_tau_max = int(
+                min(
+                    int(getattr(self.config, 'tau_max', 10)),
+                    int(getattr(self.config, 'anchor_interval', getattr(self.config, 'tau_max', 10))),
+                )
+            )
+            token_arr = np.asarray(token_counts, dtype=np.float64)
+            tau_arr = np.asarray(intervals, dtype=np.float64)
+            total_tokens = float(np.sum(token_arr))
+            lines.append(f'configured_tau_min={configured_tau_min}')
+            lines.append(f'configured_tau_max={configured_tau_max}')
+            lines.append(f'assigned_tau_min={min(intervals)}')
+            lines.append(f'assigned_tau_max={max(intervals)}')
             lines.append(f'{block_value_label}_stats=' + self._format_stats(intervals))
             if block_value_label == 'tau':
                 rates = [1.0 / max(v, 1) for v in intervals]
                 lines.append('update_rate_stats=' + self._format_stats(rates, scientific=True))
+                weighted_tau = float(np.sum(token_arr * tau_arr) / max(total_tokens, 1.0))
+                weighted_rate = float(np.sum(token_arr / np.maximum(tau_arr, 1.0)) / max(total_tokens, 1.0))
+                weighted_speedup = float(1.0 / max(weighted_rate, 1e-12))
+                block_rate = float(np.mean(1.0 / np.maximum(tau_arr, 1.0)))
+                block_speedup = float(1.0 / max(block_rate, 1e-12))
+                lines.append(f'token_weighted_tau_mean={weighted_tau:.6f}')
+                lines.append(f'token_weighted_update_rate={weighted_rate:.6e}')
+                lines.append(f'token_weighted_theoretical_speedup={weighted_speedup:.6f}')
+                lines.append(f'block_weighted_theoretical_speedup={block_speedup:.6f}')
 
         lines.append('block_detail:')
         for block in blocks:
@@ -128,97 +161,151 @@ class PartitionVisualizer:
             )
         return '\n'.join(lines) + '\n'
 
-    def _save_frame_strip(
+    def _save_combined_frame_strip(
         self,
-        partition: Partition,
-        curvature_map: torch.Tensor,
-        block_curvatures: Dict[int, float],
-        block_intervals: Dict[int, int] | None,
-        step_idx: int,
+        history: Sequence[Dict],
         save_path: str,
         max_frames: int,
-        block_value_label: str = 'tau',
-    ) -> List[int]:
-        del block_curvatures
-        ft, _, _ = curvature_map.shape
-        frame_count = min(max_frames, ft)
-        frame_indices = torch.linspace(0, ft - 1, frame_count).round().long().tolist()
-        blocks = list(partition)
-
-        tau_norm = None
-        tau_mappable = None
-        if block_intervals:
-            tau_values = [int(block_intervals.get(block.block_id, 1)) for block in blocks]
-            tau_min = min(tau_values)
-            tau_max = max(tau_values)
-            tau_norm = Normalize(vmin=tau_min, vmax=tau_max if tau_max > tau_min else tau_min + 1.0)
-            tau_mappable = ScalarMappable(norm=tau_norm, cmap='plasma')
+    ) -> List[str]:
+        del max_frames
+        total_rows = len(history)
+        if total_rows == 0:
+            return []
 
         fig, axes = plt.subplots(
-            frame_count,
+            total_rows,
             1,
-            figsize=(9.2, 3.8 * frame_count),
+            figsize=(9.2, 4.8 * total_rows),
             dpi=150,
             squeeze=False,
         )
 
-        for row, frame_idx in enumerate(frame_indices):
+        for row, h in enumerate(history):
+            partition = h['partition']
+            curvature_map = h['curvature_map'].float()
+            block_intervals = h['block_intervals']
+            step_idx = h['step_idx']
+            block_value_label = h.get('block_value_label', 'tau')
+            spatial_blocks = self._aggregate_spatial_blocks(
+                partition=partition,
+                block_intervals=block_intervals,
+                block_value_label=block_value_label,
+            )
+
+            tau_mappable = None
+            if spatial_blocks and block_intervals is not None:
+                tau_values = [float(block['mean_value']) for block in spatial_blocks]
+                tau_min = min(tau_values)
+                tau_max = max(tau_values)
+                tau_norm = Normalize(vmin=tau_min, vmax=tau_max if tau_max > tau_min else tau_min + 1.0)
+                tau_mappable = ScalarMappable(norm=tau_norm, cmap='plasma')
+
             ax = axes[row, 0]
-            frame = curvature_map[frame_idx].cpu().numpy()
-            im = ax.imshow(frame, cmap='turbo', origin='upper', aspect='auto')
+            mean_frame = curvature_map.mean(dim=0).cpu().numpy()
+            im = ax.imshow(mean_frame, cmap='turbo', origin='upper', aspect='auto')
+            mode = getattr(partition, 'partition_mode', 'unknown')
             ax.set_title(
-                f'Step {step_idx:04d} frame {frame_idx:03d} '
-                f'(curvature + {block_value_label} overlay)'
+                f'Step {step_idx:04d} mode={mode}'
             )
             ax.set_xlabel('W token')
             ax.set_ylabel('H token')
 
-            for block in blocks:
-                if not (block.f_start <= frame_idx < block.f_end):
-                    continue
-
+            for block in spatial_blocks:
                 edgecolor = '#ffffff'
-                if tau_mappable is not None and block_intervals is not None:
-                    tau = int(block_intervals.get(block.block_id, 1))
-                    edgecolor = tau_mappable.to_rgba(tau)
+                if tau_mappable is not None and block['mean_value'] is not None:
+                    edgecolor = tau_mappable.to_rgba(block['mean_value'])
 
                 rect = Rectangle(
-                    (block.w_start, block.h_start),
-                    block.w_size,
-                    block.h_size,
+                    (block['w_start'], block['h_start']),
+                    block['w_size'],
+                    block['h_size'],
                     fill=False,
                     linewidth=2.0,
                     edgecolor=edgecolor,
                 )
                 ax.add_patch(rect)
 
-                cx = block.w_start + block.w_size / 2.0
-                cy = block.h_start + block.h_size / 2.0
-                label = f'{block.f_size}x{block.h_size}x{block.w_size}'
-                if block_intervals is not None:
-                    label = f'{block_value_label}={int(block_intervals.get(block.block_id, 1))}'
-                ax.text(
-                    cx,
-                    cy,
-                    label,
-                    ha='center',
-                    va='center',
-                    fontsize=7,
-                    color='white',
-                    bbox=dict(boxstyle='round,pad=0.2', facecolor='black', alpha=0.55),
-                )
+                if block['label']:
+                    cx = block['w_start'] + block['w_size'] / 2.0
+                    cy = block['h_start'] + block['h_size'] / 2.0
+                    ax.text(
+                        cx,
+                        cy,
+                        block['label'],
+                        ha='center',
+                        va='center',
+                        fontsize=7,
+                        color='white',
+                        bbox=dict(boxstyle='round,pad=0.2', facecolor='black', alpha=0.55),
+                    )
 
             cbar = fig.colorbar(im, ax=ax, fraction=0.018, pad=0.02)
-            cbar.set_label('curvature')
+            cbar.set_label('mean curvature over frames')
 
-            if tau_mappable is not None and row == 0:
+            if tau_mappable is not None:
                 tau_cbar = fig.colorbar(tau_mappable, ax=ax, fraction=0.018, pad=0.09)
-                tau_cbar.set_label(block_value_label)
+                tau_cbar.set_label(f'mean {block_value_label}')
 
         fig.tight_layout()
         fig.savefig(save_path)
         plt.close(fig)
-        return frame_indices
+        return ['avg_all_frames']
+
+    def _format_block_size_fhw(self, partition: Partition) -> str:
+        selected = getattr(partition, 'selected_block_size', None)
+        if selected is not None and len(selected) == 3:
+            f_size, h_size, w_size = selected
+            return f'({f_size},{h_size},{w_size})'
+
+        blocks = list(partition)
+        if not blocks:
+            return '(unknown)'
+
+        f_size = blocks[0].f_size
+        h_size = blocks[0].h_size
+        w_size = blocks[0].w_size
+        return f'({f_size},{h_size},{w_size})'
+
+    def _aggregate_spatial_blocks(
+        self,
+        partition: Partition,
+        block_intervals: Dict[int, int] | None,
+        block_value_label: str,
+    ) -> List[Dict[str, int | float | str | None]]:
+        grouped: Dict[tuple[int, int, int, int], Dict[str, int | float | str | None | List[int]]] = {}
+
+        for block in partition:
+            key = (block.h_start, block.h_end, block.w_start, block.w_end)
+            if key not in grouped:
+                grouped[key] = {
+                    'h_start': block.h_start,
+                    'h_size': block.h_size,
+                    'w_start': block.w_start,
+                    'w_size': block.w_size,
+                    'values': [],
+                }
+            if block_intervals is not None:
+                grouped[key]['values'].append(int(block_intervals.get(block.block_id, 1)))
+
+        aggregated: List[Dict[str, int | float | str | None]] = []
+        for key in sorted(grouped):
+            item = grouped[key]
+            values = item.pop('values')
+            mean_value = None
+            label = ''
+            if values:
+                mean_value = float(np.mean(values))
+                min_value = min(values)
+                max_value = max(values)
+                label = (
+                    f'{block_value_label}={min_value}'
+                    if min_value == max_value
+                    else f'{block_value_label}={min_value}-{max_value}'
+                )
+            item['mean_value'] = mean_value
+            item['label'] = label
+            aggregated.append(item)
+        return aggregated
 
     def _format_stats(self, values: Sequence[int | float], scientific: bool = False) -> str:
         if not values:
@@ -276,64 +363,7 @@ class CubicVisualizer:
         save_meta: bool = False,
         file_suffix: str | None = None,
     ):
-        if not curvature_history:
-            return
-
-        vis_dir = os.path.join(output_dir, 'curvature_vis')
-        os.makedirs(vis_dir, exist_ok=True)
-
-        overview_name = 'curvature_overview.png'
-        if file_suffix:
-            safe_suffix = str(file_suffix).replace(os.sep, '_').replace(' ', '_')
-            overview_name = f'curvature_overview_{safe_suffix}.png'
-
-        mean_tiles = []
-        labels = []
-
-        for item in curvature_history:
-            step = item['step'] if item['step'] is not None else -1
-            t_val = float(item['t'])
-            curv = item['curvature_map'].float()
-            ft, ht, wt = curv.shape
-
-            stem = f"step_{step:04d}" if step >= 0 else 'step_unknown'
-            mean_hw = curv.mean(dim=0)
-            mean_tiles.append(mean_hw.detach().cpu().numpy())
-            labels.append(f'step {step:04d}  t={t_val:.3f}')
-
-            if save_raw:
-                npz_path = os.path.join(vis_dir, f'{stem}_map.npz')
-                np.savez_compressed(npz_path, curvature_map=curv.numpy())
-
-            if save_meta:
-                meta_path = os.path.join(vis_dir, f'{stem}_meta.txt')
-                with open(meta_path, 'w', encoding='utf-8') as f:
-                    f.write(f'step={step}\n')
-                    f.write(f't={t_val:.8f}\n')
-                    f.write(f'shape=({ft}, {ht}, {wt})\n')
-                    f.write(f'mean={float(curv.mean().item()):.8e}\n')
-                    f.write(f'std={float(curv.std().item()):.8e}\n')
-
-            if save_strip:
-                frame_count = min(max_frames, ft)
-                frame_indices = torch.linspace(0, ft - 1, frame_count).round().long().tolist()
-                tiles = [curv[idx] for idx in frame_indices]
-                strip = torch.cat(tiles, dim=1)
-                self._save_single_heatmap(
-                    strip.detach().cpu().numpy(),
-                    os.path.join(vis_dir, f'{stem}_time_strip.png'),
-                    title=f'{stem} time strip',
-                )
-
-        self._save_heatmap_grid(
-            mean_tiles,
-            labels,
-            os.path.join(vis_dir, overview_name),
-            suptitle='Anchor Curvature Mean-HW Overview',
-            cmap='turbo',
-            cbar_label='curvature',
-            force_single_row=True,
-        )
+        pass
 
     def export_straightness_records(self, records, output_dir: str):
         if not records:
