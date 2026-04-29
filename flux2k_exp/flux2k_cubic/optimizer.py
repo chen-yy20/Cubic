@@ -5,7 +5,7 @@ from typing import Dict
 
 import torch
 
-from flexflow import Phase, StepPlan
+from cubic_core import Phase, StepPlan
 
 
 @dataclass

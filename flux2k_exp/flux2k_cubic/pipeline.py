@@ -13,7 +13,7 @@ from types import SimpleNamespace
 import numpy as np
 import torch
 
-from flexflow import (
+from cubic_core import (
     AdaptivePartitioner,
     CurvatureMonitor,
     CubicVisualizer,

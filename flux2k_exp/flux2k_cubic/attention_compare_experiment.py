@@ -24,7 +24,7 @@ import torch
 from diffusers.models.attention_dispatch import dispatch_attention_fn
 from diffusers.models.embeddings import apply_rotary_emb
 
-from flexflow import AdaptivePartitioner, CurvatureMonitor, Phase
+from cubic_core import AdaptivePartitioner, CurvatureMonitor, Phase
 from flux2_klein.pipeline import Flux2KleinPipeline, compute_empirical_mu, retrieve_timesteps
 from flux2_klein.transformer import _get_qkv_projections, Flux2Attention
 from .optimizer import Flux2KAdaptiveOptimizer

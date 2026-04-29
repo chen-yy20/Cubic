@@ -21,7 +21,7 @@ from firered.pipeline import (
     calculate_dimensions,
     retrieve_timesteps,
 )
-from flexflow import (
+from cubic_core import (
     AdaptivePartitioner,
     CubicVisualizer,
     CurvatureMonitor,

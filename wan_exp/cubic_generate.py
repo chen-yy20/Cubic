@@ -10,7 +10,7 @@ warnings.filterwarnings('ignore')
 import torch
 import torch.distributed as dist
 
-from cubic_text2video import CubicWanT2V
+from wan_cubic.cubic_text2video import CubicWanT2V
 from wan.configs import WAN_CONFIGS, SIZE_CONFIGS, SUPPORTED_SIZES
 from wan.utils.utils import cache_video, str2bool
 
@@ -31,6 +31,7 @@ SPEEDUP = 2
 WARMUP = 5
 COOLDOWN = 5
 ANCHOR_INTERVAL = 8
+VISUALIZE = True
 
 
 TAG = 'cubic'
@@ -201,7 +202,7 @@ def _parse_args():
     parser.add_argument(
         '--enable_visualization',
         type=str2bool,
-        default=False,
+        default=VISUALIZE,
         help='Enable visualization generation and related artifact export.',
     )
     parser.add_argument(
