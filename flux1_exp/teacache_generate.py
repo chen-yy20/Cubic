@@ -20,6 +20,7 @@ from baseline.teacache_flux import reset_teacache_state, teacache_forward
 
 from flux.pipeline import FluxPipeline
 from flux.transformer import FluxTransformer2DModel
+from utils.launch_defaults import resolve_model_path
 
 # teacache_flux.py 默认 patch 的是 diffusers 的 FluxTransformer2DModel，
 # 但本项目 flux/transformer.py 定义了自己的同名类，需要单独 patch。
@@ -34,7 +35,6 @@ from utils.timer import (
 )
 
 # ── 默认配置（与 ori/cubic 保持一致，便于质量对比）────────────────────────────
-MODEL_PATH         = "/home/fit/zhaijdcyy/WORK/models/Flux-1"
 PROMPT             = "A photorealistic cute cat, wearing a simple blue shirt, standing against a clear sky background."
 HEIGHT             = 1024
 WIDTH              = 1024
@@ -45,8 +45,6 @@ SEEDS              = [42 + i for i in range(NUM_IMAGES)]
 REL_L1_THRESH      = 0.0   # 官方默认；越大越快质量损失越多（0.25/0.4/0.6/0.8 对应 ~12/10/9/8s）
 
 TAG      = "teacache"
-MODEL_ID = os.path.basename(MODEL_PATH.rstrip("/"))
-
 quality_eval = True
 
 
@@ -54,7 +52,7 @@ quality_eval = True
 
 def parse_args() -> argparse.Namespace:
     parser = argparse.ArgumentParser(description="Flux TeaCache inference script")
-    parser.add_argument("--model_path",          type=str,   default=MODEL_PATH)
+    parser.add_argument("--model_path",          type=str,   default=None)
     parser.add_argument("--prompt",              type=str,   default=PROMPT)
     parser.add_argument("--height",              type=int,   default=HEIGHT)
     parser.add_argument("--width",               type=int,   default=WIDTH)
@@ -89,6 +87,7 @@ def load_pipeline(model_path: str) -> FluxPipeline:
 def main() -> None:
     init_timer()
     args = parse_args()
+    args.model_path = resolve_model_path(args.model_path, "--model_path")
 
     seeds = args.seeds if args.seeds is not None else [42 + i for i in range(args.num_images)]
     prompt_id  = get_prompt_id(args.prompt)

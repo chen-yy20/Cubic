@@ -15,6 +15,7 @@ import wan
 from wan.configs import WAN_CONFIGS, SIZE_CONFIGS, SUPPORTED_SIZES
 from wan.utils.utils import cache_video, str2bool
 
+from utils.launch_defaults import resolve_model_path
 from utils.timer import init_timer, print_time_statistics, get_time_statistics_dict
 from utils.results import save_params_and_metrics, get_prompt_id
 from dist.parallel_state import (
@@ -25,11 +26,19 @@ from dist.parallel_state import (
 init_timer()
 
 PROMPT = "Two anthropomorphic cats in comfy boxing gear and bright gloves fight intensely on a spotlighted stage."
-MODEL_PATH = "/home/fit/zhaijdcyy/WORK/models/Wan2.1-T2V-1.3B"
 
 TAG = "ori"
-model_id = "1.3B" if "1.3B" in MODEL_PATH else "14B"
-OUTPUT_DIR = f"./results/wan/{model_id}/ori/{get_prompt_id(PROMPT)}"
+
+
+def _resolve_model_defaults(model_path):
+    if "1.3B" in model_path:
+        return "t2v-1.3B", "832*480", "1.3B"
+    return "t2v-14B", "1280*720", "14B"
+
+
+def _default_output_dir(model_path):
+    _, _, model_id = _resolve_model_defaults(model_path)
+    return f"./results/wan/{model_id}/ori/{get_prompt_id(PROMPT)}"
 
 # 2卡并行初始化（CFG parallel）
 rank = int(os.getenv("RANK", 0))
@@ -181,16 +190,16 @@ def _parse_args():
     parser.add_argument(
         "--output_dir",
         type=str,
-        default="./results/wan",
+        default=None,
         help="output_dir.",
     )
 
     args = parser.parse_args()
-    args.task = "t2v-1.3B" if "1.3B" in MODEL_PATH else "t2v-14B"
-    args.size = "832*480" if "1.3B" in MODEL_PATH else "1280*720"
+    args.ckpt_dir = resolve_model_path(args.ckpt_dir, "--ckpt_dir")
+    args.task, args.size, _ = _resolve_model_defaults(args.ckpt_dir)
     args.prompt = PROMPT
-    args.ckpt_dir = MODEL_PATH
-    args.output_dir = OUTPUT_DIR
+    if args.output_dir is None:
+        args.output_dir = _default_output_dir(args.ckpt_dir)
     args.base_seed = 42 if args.base_seed < 0 else args.base_seed
 
     _validate_args(args)
@@ -290,18 +299,19 @@ if __name__ == "__main__":
 
     rank = int(os.getenv("RANK", 0))
     if rank == 0:
+        _, _, model_id = _resolve_model_defaults(args.ckpt_dir)
         params = {
             "model": "wan",
             "method": "ori",
             "model_id": model_id,
-            "model_path": MODEL_PATH,
+            "model_path": args.ckpt_dir,
             "prompt": PROMPT,
             "task": args.task,
             "size": args.size,
             "base_seed": args.base_seed,
         }
         params_path = save_params_and_metrics(
-            OUTPUT_DIR,
+            args.output_dir,
             TAG,
             params,
             get_time_statistics_dict(),

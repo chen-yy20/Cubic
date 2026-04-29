@@ -7,10 +7,10 @@ import torch
 
 from flux2_klein.pipeline import Flux2KleinPipeline
 from flux2_klein.transformer import Flux2Transformer2DModel
+from utils.launch_defaults import resolve_model_path
 from utils.results import get_prompt_id, save_params_and_metrics
 from utils.timer import get_timer, get_time_statistics_dict, init_timer, print_time_statistics
 
-MODEL_PATH = "/home/chenyy/WORK/models/flux2-klein"  # black-forest-labs/FLUX.2-klein-4B
 PROMPT = "A cat holding a sign that says hello world"
 TAG = "ori"
 NUM_IMAGES = 3
@@ -19,7 +19,7 @@ WARMUP_RUNS = 2
 
 def parse_args() -> argparse.Namespace:
     parser = argparse.ArgumentParser(description="Flux2-klein inference script")
-    parser.add_argument("--model_path", type=str, default=MODEL_PATH, help="Model path or HuggingFace model ID")
+    parser.add_argument("--model_path", type=str, default=None, help="Model path or HuggingFace model ID")
     parser.add_argument("--prompt", type=str, default=PROMPT, help="Generation prompt")
     parser.add_argument(
         "--output_dir",
@@ -78,6 +78,7 @@ def load_pipeline(model_path: str, dtype: torch.dtype, device: str) -> Flux2Klei
 
 def main() -> None:
     args = parse_args()
+    args.model_path = resolve_model_path(args.model_path, "--model_path")
     dtype = torch.bfloat16
     output_dir, output_image_path, model_id = _resolve_output_paths(
         args.model_path, args.prompt, args.output_dir, args.output_image

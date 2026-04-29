@@ -1,9 +1,11 @@
+import argparse
 import os
 
 import torch
 
 from flux.pipeline import FluxPipeline
 from flux.transformer import FluxTransformer2DModel
+from utils.launch_defaults import resolve_model_path
 from utils.results import get_prompt_id, save_params_and_metrics
 from utils.timer import (
     disable_timing,
@@ -15,15 +17,18 @@ from utils.timer import (
 
 HEIGHT = 1024
 WIDTH = 1024
-MODEL_PATH = "/home/fit/zhaijdcyy/WORK/models/Flux-1"
 PROMPT = "A photorealistic cute cat, wearing a simple blue shirt, standing against a clear sky background."
 NUM_INFERENCE_STEPS = 50
 GUIDANCE_SCALE = 3.5
 TAG = "ori"
-OUTPUT_DIR = f"./results/flux/{TAG}/{get_prompt_id(PROMPT)}"
-MODEL_ID = os.path.basename(MODEL_PATH.rstrip("/"))
 NUM_IMAGES = 3
 SEEDS = [42 + i for i in range(NUM_IMAGES)]
+
+
+def parse_args() -> argparse.Namespace:
+    parser = argparse.ArgumentParser(description="Flux inference script")
+    parser.add_argument("--model_path", type=str, default=None, help="Model path or HuggingFace model ID")
+    return parser.parse_args()
 
 
 def load_pipeline(model_path: str) -> FluxPipeline:
@@ -36,11 +41,16 @@ def load_pipeline(model_path: str) -> FluxPipeline:
 
 
 def main() -> None:
+    args = parse_args()
+    model_path = resolve_model_path(args.model_path, "--model_path")
+    model_id = os.path.basename(model_path.rstrip("/"))
+    output_dir = f"./results/flux/{TAG}/{get_prompt_id(PROMPT)}"
+
     init_timer()
-    os.makedirs(OUTPUT_DIR, exist_ok=True)
+    os.makedirs(output_dir, exist_ok=True)
 
     prompt = PROMPT
-    pipe = load_pipeline(MODEL_PATH)
+    pipe = load_pipeline(model_path)
     print(f"Model loaded, GPU memory allocated: {torch.cuda.memory_allocated()/1024**2:.2f}MB", flush=True)
 
     disable_timing()
@@ -70,7 +80,7 @@ def main() -> None:
                 max_sequence_length=512,
                 generator=generator,
             ).images[0]
-        output_path = os.path.join(OUTPUT_DIR, f"{TAG}_{get_prompt_id(PROMPT)}_seed{seed}.png")
+        output_path = os.path.join(output_dir, f"{TAG}_{get_prompt_id(PROMPT)}_seed{seed}.png")
         image.save(output_path)
         print(f"Stored {output_path}!", flush=True)
 
@@ -78,8 +88,8 @@ def main() -> None:
     params = {
         "model": "flux",
         "method": TAG,
-        "model_id": MODEL_ID,
-        "model_path": MODEL_PATH,
+        "model_id": model_id,
+        "model_path": model_path,
         "prompt": PROMPT,
         "height": HEIGHT,
         "width": WIDTH,
@@ -89,7 +99,7 @@ def main() -> None:
         "seeds": SEEDS,
     }
     params_path = save_params_and_metrics(
-        OUTPUT_DIR,
+        output_dir,
         TAG,
         params,
         get_time_statistics_dict(),

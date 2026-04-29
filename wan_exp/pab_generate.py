@@ -29,6 +29,7 @@ from wan.utils.utils import cache_video, cache_image, str2bool
 
 # Cubic utilities for timing and quality evaluation
 sys.path.insert(0, os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
+from utils.launch_defaults import resolve_model_path
 from utils.quality_metric import evaluate_quality_with_origin
 from utils.results import get_prompt_id, save_params_and_metrics
 from utils.timer import get_time_statistics_dict, init_timer, print_time_statistics, save_time_stats_to_file, get_timer
@@ -37,7 +38,6 @@ init_timer()
 
 # Constants for PAB
 TAG = 'pab'
-MODEL_PATH = "/home/fit/zhaijdcyy/WORK/models/Wan2.1-T2V-1.3B"
 PROMPT = 'Two anthropomorphic cats in comfy boxing gear and bright gloves fight intensely on a spotlighted stage.'
 
 # PAB Configuration
@@ -47,13 +47,21 @@ PAB_WARMUP = 5  # Warmup steps before PAB starts
 PAB_COOLDOWN = 5  # Cooldown steps at the end (full computation)
 PAB_LAYER_INTERVAL = 1  # Apply to every layer
 
-model_id = '1.3B' if '1.3B' in MODEL_PATH else '14B'
-OUTPUT_DIR = f'./results/wan/{model_id}/pab/{get_prompt_id(PROMPT)}'
-
 REQUIRED_TIMER_NAMES = [
     'generate_e2e',
     'model_forward',
 ]
+
+
+def _resolve_model_defaults(model_path):
+    if '1.3B' in model_path:
+        return 't2v-1.3B', '832*480', '1.3B'
+    return 't2v-14B', '1280*720', '14B'
+
+
+def _default_output_dir(model_path):
+    _, _, model_id = _resolve_model_defaults(model_path)
+    return f'./results/wan/{model_id}/pab/{get_prompt_id(PROMPT)}'
 
 EXAMPLE_PROMPT = {
     "t2v-1.3B": {
@@ -763,11 +771,12 @@ def _parse_args():
 
     args = parser.parse_args()
     # Set default values
-    args.task = 't2v-1.3B' if '1.3B' in MODEL_PATH else 't2v-14B'
-    args.size = '832*480' if '1.3B' in MODEL_PATH else '1280*720'
+    args.ckpt_dir = resolve_model_path(args.ckpt_dir, '--ckpt_dir')
+    args.task, args.size, _ = _resolve_model_defaults(args.ckpt_dir)
     if args.prompt is None:
         args.prompt = PROMPT
-    args.ckpt_dir = MODEL_PATH
+    if args.output_dir is None:
+        args.output_dir = _default_output_dir(args.ckpt_dir)
     args.base_seed = 42 if args.base_seed < 0 else args.base_seed
 
     _validate_args(args)
@@ -795,7 +804,7 @@ def generate(args):
     _init_logging(rank)
 
     # Initialize output directory
-    output_dir = args.output_dir if hasattr(args, 'output_dir') and args.output_dir else OUTPUT_DIR
+    output_dir = args.output_dir
     os.makedirs(output_dir, exist_ok=True)
 
     if args.offload_model is None:
@@ -1021,16 +1030,17 @@ if __name__ == "__main__":
 
     rank = int(os.getenv('RANK', 0))
     if rank == 0:
-        output_dir = args.output_dir if hasattr(args, 'output_dir') and args.output_dir else OUTPUT_DIR
+        output_dir = args.output_dir
         save_time_stats_to_file(
             os.path.join(output_dir, 'timing_stats.txt'),
             timer_names=REQUIRED_TIMER_NAMES,
         )
+        _, _, model_id = _resolve_model_defaults(args.ckpt_dir)
         params = {
             'model': 'wan',
             'method': 'pab',
             'model_id': model_id,
-            'model_path': MODEL_PATH,
+            'model_path': args.ckpt_dir,
             'prompt': PROMPT,
             'task': args.task,
             'size': args.size,

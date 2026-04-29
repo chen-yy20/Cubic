@@ -36,9 +36,9 @@ from pie_bench_common import (
     image_bytes_to_pil,
     target_prompt_to_hpsv3_caption,
 )
+from utils.launch_defaults import resolve_model_path
 from utils.results import save_params_and_metrics
 
-MODEL_PATH = "/home/fit/zhaijdcyy/WORK/models/FireRed-Image-Edit-1.0"
 DEFAULT_PARQUET = str(_CUBIC_ROOT / "data/pie_++/V1-00000-of-00001.parquet")
 
 PIE_METHODS = ("ori", "teacache", "jano", "pab", "cubic")
@@ -248,7 +248,7 @@ def parse_args() -> argparse.Namespace:
         type=Path,
         default=Path(DEFAULT_PARQUET),
     )
-    p.add_argument("--model_path", type=str, default=MODEL_PATH)
+    p.add_argument("--model_path", type=str, default=None)
     p.add_argument(
         "--output_root",
         type=Path,
@@ -321,6 +321,7 @@ def parse_args() -> argparse.Namespace:
 def main() -> None:
     _init_logging()
     args = parse_args()
+    args.model_path = resolve_model_path(args.model_path, "--model_path")
     if args.num_inference_steps is None:
         args.num_inference_steps = 40 if args.method == "cubic" else 50
     tag = args.tag or args.method

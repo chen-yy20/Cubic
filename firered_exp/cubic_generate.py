@@ -11,11 +11,11 @@ from PIL import Image
 from firered_cubic.pipeline import CubicQwenImageEditPlusPipeline
 from firered_cubic.transformer import CubicQwenImageTransformer2DModel
 
+from utils.launch_defaults import resolve_model_path
 from utils.quality_metric import evaluate_quality_with_origin
 from utils.results import get_prompt_id, save_params_and_metrics
 from utils.timer import get_time_statistics_dict, get_timer, init_timer, print_time_statistics
 
-MODEL_PATH = "/home/fit/zhaijdcyy/WORK/models/FireRed-Image-Edit-1.0"
 IMAGE_PATH = "/home/fit/zhaijdcyy/WORK/Cubic/firered_exp/examples/cola.png"
 PROMPT = "Transform the object into a realistic miniature product by carefully holding it between your thumb and forefinger."
 TAG = "cubic"
@@ -41,7 +41,7 @@ def _init_logging() -> None:
 
 def parse_args() -> argparse.Namespace:
     parser = argparse.ArgumentParser(description="FireRed Cubic monitor-only inference script")
-    parser.add_argument("--model_path", type=str, default=MODEL_PATH)
+    parser.add_argument("--model_path", type=str, default=None)
     parser.add_argument("--input_image", type=Path, nargs="+", default=[Path(IMAGE_PATH)])
     parser.add_argument("--output_image", type=Path, default=None)
     parser.add_argument("--output_dir", type=Path, default=None)
@@ -94,6 +94,7 @@ def main() -> None:
     _init_logging()
     init_timer()
     args = parse_args()
+    args.model_path = resolve_model_path(args.model_path, "--model_path")
     output_dir, output_image_path, model_id = _resolve_output_paths(
         args.model_path,
         args.prompt,

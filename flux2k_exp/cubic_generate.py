@@ -11,11 +11,11 @@ from flux2k_cubic import (
 	run_straightness_sampling,
 	save_straightness_summary,
 )
+from utils.launch_defaults import resolve_model_path
 from utils.quality_metric import evaluate_quality_with_origin
 from utils.results import save_params_and_metrics
 from utils.timer import get_timer, get_time_statistics_dict, init_timer, print_time_statistics
 
-MODEL_PATH = "/home/chenyy/WORK/models/flux2-klein"
 PROMPT = "A cat holding a sign that says hello world"
 NUM_IMAGES = 3
 WARMUP_RUNS = 2
@@ -27,7 +27,7 @@ compare_attention_scenarios = False # 是否比较KV Cache引入的误差
 
 def parse_args() -> argparse.Namespace:
 	parser = argparse.ArgumentParser(description="Flux2-klein cubic straightness visualization")
-	parser.add_argument("--model_path", type=str, default=MODEL_PATH, help="Model path or HuggingFace model ID")
+	parser.add_argument("--model_path", type=str, default=None, help="Model path or HuggingFace model ID")
 	parser.add_argument("--prompt", type=str, default=PROMPT, help="Generation prompt")
 	parser.add_argument(
 		"--output_dir",
@@ -68,6 +68,7 @@ def parse_args() -> argparse.Namespace:
 
 def main() -> None:
 	args = parse_args()
+	args.model_path = resolve_model_path(args.model_path, "--model_path")
 	dtype = torch.bfloat16
 	mode_suffix = "attention_compare" if bool(args.compare_attention_scenarios) else "selective"
 	output_dir, output_image_path, model_id = resolve_output_paths(

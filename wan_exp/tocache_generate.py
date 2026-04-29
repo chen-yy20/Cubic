@@ -24,6 +24,7 @@ from dist.parallel_state import (
     init_cp_group,
     init_distributed_environment,
 )
+from utils.launch_defaults import resolve_model_path
 from utils.quality_metric import evaluate_quality_with_origin
 from utils.results import get_prompt_id, save_params_and_metrics
 from utils.timer import (
@@ -36,19 +37,26 @@ from utils.timer import (
 init_timer()
 
 TAG = 'tocache'
-MODEL_PATH = '/home/fit/zhaijdcyy/WORK/models/Wan2.1-T2V-1.3B'
 PROMPT = (
     'Two anthropomorphic cats in comfy boxing gear and bright gloves fight intensely '
     'on a spotlighted stage.'
 )
 
-model_id = '1.3B' if '1.3B' in MODEL_PATH else '14B'
-OUTPUT_DIR = f'./results/wan/{model_id}/tocache/{get_prompt_id(PROMPT)}'
-
 # Baseline `WanT2V_toca.generate` wraps the diffusion loop in `get_timer("generate_e2e")`.
 REQUIRED_TIMER_NAMES = [
     'generate_e2e',
 ]
+
+
+def _resolve_model_defaults(model_path):
+    if '1.3B' in model_path:
+        return 't2v-1.3B', '832*480', '1.3B'
+    return 't2v-14B', '1280*720', '14B'
+
+
+def _default_output_dir(model_path):
+    _, _, model_id = _resolve_model_defaults(model_path)
+    return f'./results/wan/{model_id}/tocache/{get_prompt_id(PROMPT)}'
 
 rank = int(os.getenv('RANK', 0))
 world_size = int(os.getenv('WORLD_SIZE', 1))
@@ -199,16 +207,16 @@ def _parse_args():
     parser.add_argument(
         '--output_dir',
         type=str,
-        default='./results/wan',
+        default=None,
         help='output_dir.',
     )
 
     args = parser.parse_args()
-    args.task = 't2v-1.3B' if '1.3B' in MODEL_PATH else 't2v-14B'
-    args.size = '832*480' if '1.3B' in MODEL_PATH else '1280*720'
+    args.ckpt_dir = resolve_model_path(args.ckpt_dir, '--ckpt_dir')
+    args.task, args.size, _ = _resolve_model_defaults(args.ckpt_dir)
     args.prompt = PROMPT
-    args.ckpt_dir = MODEL_PATH
-    args.output_dir = OUTPUT_DIR
+    if args.output_dir is None:
+        args.output_dir = _default_output_dir(args.ckpt_dir)
     args.base_seed = 42 if args.base_seed < 0 else args.base_seed
 
     _validate_args(args)
@@ -233,7 +241,7 @@ def generate(args):
     device = cur_local_rank
     _init_logging(cur_rank)
 
-    output_dir = getattr(args, 'output_dir', None) or OUTPUT_DIR
+    output_dir = args.output_dir
     if cur_rank == 0:
         os.makedirs(output_dir, exist_ok=True)
 
@@ -332,16 +340,17 @@ if __name__ == '__main__':
 
     cur_rank = int(os.getenv('RANK', 0))
     if cur_rank == 0:
-        out_dir = getattr(args, 'output_dir', None) or OUTPUT_DIR
+        out_dir = args.output_dir
         save_time_stats_to_file(
             os.path.join(out_dir, 'timing_stats.txt'),
             timer_names=REQUIRED_TIMER_NAMES,
         )
+        _, _, model_id = _resolve_model_defaults(args.ckpt_dir)
         params = {
             'model': 'wan',
             'method': 'tocache',
             'model_id': model_id,
-            'model_path': MODEL_PATH,
+            'model_path': args.ckpt_dir,
             'prompt': PROMPT,
             'task': args.task,
             'size': args.size,

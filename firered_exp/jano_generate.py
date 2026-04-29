@@ -38,12 +38,12 @@ import baseline.jano_firered  # noqa: F401
 from firered.pipeline import QwenImageEditPlusPipeline
 from firered.transformer import QwenImageTransformer2DModel
 
+from utils.launch_defaults import resolve_model_path
 from utils.quality_metric import evaluate_quality_with_origin
 from utils.results import get_prompt_id, save_params_and_metrics
 from utils.timer import get_time_statistics_dict, get_timer, init_timer, print_time_statistics
 
 # ── 默认配置 ──────────────────────────────────────────────────────────────────
-MODEL_PATH = "/home/fit/zhaijdcyy/WORK/models/FireRed-Image-Edit-1.0"
 IMAGE_PATH = "/home/fit/zhaijdcyy/WORK/Cubic/firered_exp/examples/cola.png"
 PROMPT = (
     "Transform the object into a realistic miniature product by carefully holding it "
@@ -79,7 +79,7 @@ def _init_logging() -> None:
 
 def parse_args() -> argparse.Namespace:
     parser = argparse.ArgumentParser(description="FireRed Jano inference script")
-    parser.add_argument("--model_path",  type=str,  default=MODEL_PATH)
+    parser.add_argument("--model_path",  type=str,  default=None)
     parser.add_argument("--input_image", type=Path, nargs="+", default=[Path(IMAGE_PATH)])
     parser.add_argument("--output_image", type=Path, default=None)
     parser.add_argument("--output_dir",   type=Path, default=None)
@@ -161,6 +161,7 @@ def main() -> None:
     _init_logging()
     init_timer()
     args = parse_args()
+    args.model_path = resolve_model_path(args.model_path, "--model_path")
 
     # 开始 generate_e2e 计时（覆盖整个生成流程）
     timer_context = get_timer("generate_e2e")

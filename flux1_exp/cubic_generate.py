@@ -1,3 +1,4 @@
+import argparse
 import os
 from statistics import mean
 
@@ -5,13 +6,13 @@ import torch
 
 from flux.transformer import FluxTransformer2DModel
 from flux_cubic.pipeline import CubicFluxPipeline
+from utils.launch_defaults import resolve_model_path
 from utils.quality_metric import evaluate_quality_with_origin
 from utils.results import get_prompt_id, save_params_and_metrics
 from utils.timer import get_time_statistics_dict, init_timer, print_time_statistics
 
 HEIGHT = 1024
 WIDTH = 1024
-MODEL_PATH = "/home/fit/zhaijdcyy/WORK/models/Flux-1"
 PROMPT = "A photorealistic cute cat, wearing a simple blue shirt, standing against a clear sky background."
 NUM_INFERENCE_STEPS = 50
 GUIDANCE_SCALE = 3.5
@@ -24,11 +25,15 @@ COOLDOWN_FRACTION = 0.1
 ANCHOR_INTERVAL = 10
 
 TAG = "cubic"
-OUTPUT_DIR = f"./results/flux/{TAG}/{get_prompt_id(PROMPT)}_{SPEEDUP}x"
-MODEL_ID = os.path.basename(MODEL_PATH.rstrip("/"))
 
 curvature_visualize = False # Set to True to enable curvature visualization, which will store curvature maps and token selection maps for each step in the specified results directory. This is useful for analyzing the behavior of the cubic scheduling, but will consume more storage and slightly more time due to the additional I/O operations.
 quality_eval = True
+
+
+def parse_args() -> argparse.Namespace:
+    parser = argparse.ArgumentParser(description="Flux cubic inference script")
+    parser.add_argument("--model_path", type=str, default=None, help="Model path or HuggingFace model ID")
+    return parser.parse_args()
 
 
 def load_pipeline(model_path: str) -> CubicFluxPipeline:
@@ -41,10 +46,15 @@ def load_pipeline(model_path: str) -> CubicFluxPipeline:
 
 
 def main() -> None:
-    init_timer()
-    os.makedirs(OUTPUT_DIR, exist_ok=True)
+    args = parse_args()
+    model_path = resolve_model_path(args.model_path, "--model_path")
+    model_id = os.path.basename(model_path.rstrip("/"))
+    output_dir = f"./results/flux/{TAG}/{get_prompt_id(PROMPT)}_{SPEEDUP}x"
 
-    pipe = load_pipeline(MODEL_PATH)
+    init_timer()
+    os.makedirs(output_dir, exist_ok=True)
+
+    pipe = load_pipeline(model_path)
     print(f"Model loaded, GPU memory allocated: {torch.cuda.memory_allocated()/1024**2:.2f}MB", flush=True)
 
     per_seed_quality: dict[str, dict] = {}
@@ -65,10 +75,10 @@ def main() -> None:
                 cubic_anchor_interval=ANCHOR_INTERVAL,
                 cubic_target_speedup=SPEEDUP,
                 cubic_enable_visualization=curvature_visualize,
-                cubic_results_dir=OUTPUT_DIR,
+                cubic_results_dir=output_dir,
                 cubic_visual_tag=f"seed{seed}",
             ).images[0]
-        output_path = os.path.join(OUTPUT_DIR, f"{TAG}_{get_prompt_id(PROMPT)}_seed{seed}.png")
+        output_path = os.path.join(output_dir, f"{TAG}_{get_prompt_id(PROMPT)}_seed{seed}.png")
         image.save(output_path)
         print(f"Stored {output_path}!", flush=True)
 
@@ -78,7 +88,7 @@ def main() -> None:
                 tag=TAG,
                 save_metrics=False,
                 baseline_path=None,
-                output_dir=OUTPUT_DIR,
+                output_dir=output_dir,
             )
             per_seed_quality[f"seed{seed}"] = quality_result["metrics"] if quality_result is not None else {}
 
@@ -105,8 +115,8 @@ def main() -> None:
     params = {
         "model": "flux",
         "method": TAG,
-        "model_id": MODEL_ID,
-        "model_path": MODEL_PATH,
+        "model_id": model_id,
+        "model_path": model_path,
         "prompt": PROMPT,
         "height": HEIGHT,
         "width": WIDTH,
@@ -121,7 +131,7 @@ def main() -> None:
         "quality_eval": quality_eval,
     }
     params_path = save_params_and_metrics(
-        OUTPUT_DIR,
+        output_dir,
         TAG,
         params,
         get_time_statistics_dict(),

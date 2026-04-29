@@ -18,6 +18,7 @@ from dist.parallel_state import (
     init_cp_group,
     init_distributed_environment,
 )
+from utils.launch_defaults import resolve_model_path
 from utils.quality_metric import evaluate_quality_with_origin
 from utils.results import get_prompt_id, save_params_and_metrics
 from utils.timer import get_time_statistics_dict, init_timer, print_time_statistics, save_time_stats_to_file
@@ -25,7 +26,6 @@ from utils.timer import get_time_statistics_dict, init_timer, print_time_statist
 init_timer()
 
 PROMPT = 'Two anthropomorphic cats in comfy boxing gear and bright gloves fight intensely on a spotlighted stage.'
-MODEL_PATH = "/home/fit/zhaijdcyy/WORK/models/Wan2.1-T2V-1.3B"
 # Cubic optimizer / scheduler knobs
 SPEEDUP = 2
 WARMUP = 5
@@ -35,8 +35,6 @@ VISUALIZE = True
 
 
 TAG = 'cubic'
-model_id = '1.3B' if '1.3B' in MODEL_PATH else '14B'
-OUTPUT_DIR = f'./results/wan/{model_id}/cubic/{get_prompt_id(PROMPT)}_{SPEEDUP}x'
 REQUIRED_TIMER_NAMES = [
     'generate_e2e',
     'anchor_step_monitor',
@@ -46,6 +44,17 @@ REQUIRED_TIMER_NAMES = [
     'selective_forward',
     'warmup_cooldown_step',
 ]
+
+
+def _resolve_model_defaults(model_path):
+    if '1.3B' in model_path:
+        return 't2v-1.3B', '832*480', '1.3B'
+    return 't2v-14B', '1280*720', '14B'
+
+
+def _default_output_dir(model_path):
+    _, _, model_id = _resolve_model_defaults(model_path)
+    return f'./results/wan/{model_id}/cubic/{get_prompt_id(PROMPT)}_{SPEEDUP}x'
 
 rank = int(os.getenv('RANK', 0))
 world_size = int(os.getenv('WORLD_SIZE', 1))
@@ -196,7 +205,7 @@ def _parse_args():
     parser.add_argument(
         '--output_dir',
         type=str,
-        default='./results/wan',
+        default=None,
         help='output_dir.',
     )
     parser.add_argument(
@@ -213,11 +222,11 @@ def _parse_args():
     )
 
     args = parser.parse_args()
-    args.task = 't2v-1.3B' if '1.3B' in MODEL_PATH else 't2v-14B'
-    args.size = '832*480' if '1.3B' in MODEL_PATH else '1280*720'
+    args.ckpt_dir = resolve_model_path(args.ckpt_dir, '--ckpt_dir')
+    args.task, args.size, _ = _resolve_model_defaults(args.ckpt_dir)
     args.prompt = PROMPT
-    args.ckpt_dir = MODEL_PATH
-    args.output_dir = OUTPUT_DIR
+    if args.output_dir is None:
+        args.output_dir = _default_output_dir(args.ckpt_dir)
     args.base_seed = 42 if args.base_seed < 0 else args.base_seed
 
     _validate_args(args)
@@ -348,21 +357,22 @@ if __name__ == '__main__':
     cur_rank = int(os.getenv('RANK', 0))
     if cur_rank == 0:
         save_time_stats_to_file(
-            os.path.join(OUTPUT_DIR, 'timing_stats.txt'),
+            os.path.join(args.output_dir, 'timing_stats.txt'),
             timer_names=REQUIRED_TIMER_NAMES,
         )
+        _, _, model_id = _resolve_model_defaults(args.ckpt_dir)
         params = {
             'model': 'wan',
             'method': 'cubic',
             'model_id': model_id,
-            'model_path': MODEL_PATH,
+            'model_path': args.ckpt_dir,
             'prompt': PROMPT,
             'task': args.task,
             'size': args.size,
             'base_seed': args.base_seed,
         }
         params_path = save_params_and_metrics(
-            OUTPUT_DIR,
+            args.output_dir,
             TAG,
             params,
             get_time_statistics_dict(timer_names=REQUIRED_TIMER_NAMES),
