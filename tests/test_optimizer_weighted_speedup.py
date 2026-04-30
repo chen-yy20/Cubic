@@ -10,9 +10,6 @@ class WeightedSpeedupOptimizerTests(unittest.TestCase):
         cfg = SimpleNamespace(
             alpha=2.0,
             beta=4.0,
-            tau_min=1,
-            tau_max=8,
-            anchor_interval=8,
             target_speedup=3.0,
             curvature_contrast_gamma=1.0,
         )
@@ -48,9 +45,6 @@ class WeightedSpeedupOptimizerTests(unittest.TestCase):
         cfg = SimpleNamespace(
             alpha=2.0,
             beta=4.0,
-            tau_min=1,
-            tau_max=8,
-            anchor_interval=8,
             target_speedup=3.0,
             curvature_contrast_gamma=1.0,
         )

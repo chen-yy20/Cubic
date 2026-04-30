@@ -3,6 +3,7 @@ import logging
 import math
 import random
 import sys
+import time
 from contextlib import contextmanager
 
 import torch
@@ -38,7 +39,6 @@ class CubicWanT2V(WanT2V):
         super().__init__(*args, **kwargs)
         self.phase_warmup_fraction = float(getattr(self.config, 'warmup_fraction', 0.15))
         self.phase_cooldown_fraction = float(getattr(self.config, 'cooldown_fraction', 0.15))
-        self.phase_anchor_interval = int(getattr(self.config, 'anchor_interval', 8))
         self.monitor = CurvatureMonitor(self.config)
         self.straightness = StraightnessEvaluator(self.config)
         self.partitioner = AdaptivePartitioner(self.config)
@@ -49,6 +49,9 @@ class CubicWanT2V(WanT2V):
         self.current_partition = None
         self.current_frequency_plan = None
         self.current_step_plan = None
+        self.step_trace = []
+        self.next_anchor_step = None
+        self.current_anchor_gap = 0
 
     def _get_inference_phase(self, step, total_steps):
         if total_steps <= 0:
@@ -66,8 +69,10 @@ class CubicWanT2V(WanT2V):
         if step >= cooldown_start:
             return 'phase4_cooldown'
 
-        anchor_interval = max(1, int(self.phase_anchor_interval))
-        if (step - warmup_steps) % anchor_interval == 0:
+        if self.next_anchor_step is None:
+            self.next_anchor_step = warmup_steps
+
+        if step == self.next_anchor_step:
             return 'phase2_cruise_anchor'
         return 'phase3_cruise_selective'
 
@@ -103,6 +108,12 @@ class CubicWanT2V(WanT2V):
         self.monitor.reset()
         self.straightness.reset()
         self.selective_forward.reset()
+        self.current_partition = None
+        self.current_frequency_plan = None
+        self.current_step_plan = None
+        self.step_trace = []
+        self.next_anchor_step = None
+        self.current_anchor_gap = 0
 
         if not self.t5_cpu:
             self.text_encoder.model.to(self.device)
@@ -207,6 +218,7 @@ class CubicWanT2V(WanT2V):
 
                     self.model.to(self.device)
                     noise_pred = None
+                    step_start = self._start_step_timer()
                     # Monitor updates at warmup tail and cruise anchors.
                     is_last_warmup = warmup_steps > 0 and phase == 'phase1_warmup' and step == warmup_steps - 1
                     is_cruise_anchor = phase == 'phase2_cruise_anchor'
@@ -281,6 +293,8 @@ class CubicWanT2V(WanT2V):
                                         block_curvatures=block_curvatures,
                                     )
                                     self.current_frequency_plan = frequency_plan
+                                    self.current_anchor_gap = max(1, 2 * int(frequency_plan.max_interval))
+                                    self.next_anchor_step = step + self.current_anchor_gap
                                     self.current_step_plan = self.step_scheduler.build_step_plan(
                                         partition=self.current_partition,
                                         block_intervals=frequency_plan.block_intervals,
@@ -289,18 +303,16 @@ class CubicWanT2V(WanT2V):
                                         selective_step_idx=max(0, step - warmup_steps),
                                     )
                                 if self.rank == 0:
-                                    configured_tau_min = int(getattr(self.frequency_optimizer, 'tau_min', 1))
-                                    configured_tau_max = int(getattr(self.frequency_optimizer, 'tau_max', 10))
                                     logging.info(
-                                        '[wan-optimizer] step=%d config_tau(min=%d max=%d) assigned_tau(min=%d max=%d mean=%.3f) mean_update_rate=%.6f achieved_speedup=%.3f',
+                                        '[wan-optimizer] step=%d assigned_tau(min=%d max=%d mean=%.3f) mean_update_rate=%.6f achieved_speedup=%.3f next_anchor_gap=%d next_anchor_step=%d',
                                         step,
-                                        configured_tau_min,
-                                        configured_tau_max,
                                         frequency_plan.min_interval,
                                         frequency_plan.max_interval,
                                         frequency_plan.mean_interval,
                                         frequency_plan.mean_update_rate,
                                         frequency_plan.achieved_speedup,
+                                        self.current_anchor_gap,
+                                        self.next_anchor_step,
                                     )
 
                                 if self.rank == 0 and enable_visualization:
@@ -322,6 +334,9 @@ class CubicWanT2V(WanT2V):
                                         '[wan-partition-vis] step=%d visualizations exported',
                                         step,
                                     )
+                            elif is_cruise_anchor:
+                                self.current_anchor_gap = 1
+                                self.next_anchor_step = step + self.current_anchor_gap
 
                             if eval_straightness:
                                 velocity_fn = self._make_velocity_fn(
@@ -386,6 +401,14 @@ class CubicWanT2V(WanT2V):
                                 generator=seed_g)[0]
                             latents = [temp_x0.squeeze(0)]
 
+                    self._record_step_trace(
+                        step=step,
+                        phase=phase,
+                        total_steps=len(timesteps),
+                        latency_ms=self._stop_step_timer(step_start),
+                        fallback_total_tokens=self._infer_total_tokens_from_shape(target_shape),
+                    )
+
             x0 = latents
             if offload_model:
                 self.model.cpu()
@@ -411,6 +434,70 @@ class CubicWanT2V(WanT2V):
             torch.distributed.barrier()
 
         return videos[0] if self.rank == 0 else None
+
+    def get_step_trace(self):
+        return [dict(record) for record in self.step_trace]
+
+    @staticmethod
+    def _start_step_timer():
+        torch.cuda.synchronize()
+        return time.perf_counter()
+
+    @staticmethod
+    def _stop_step_timer(start_time):
+        torch.cuda.synchronize()
+        return (time.perf_counter() - start_time) * 1000.0
+
+    def _infer_total_tokens_from_shape(self, target_shape):
+        pt, ph, pw = self.patch_size
+        return int(
+            (target_shape[1] // pt)
+            * (target_shape[2] // ph)
+            * (target_shape[3] // pw)
+        )
+
+    def _record_step_trace(self, step, phase, total_steps, latency_ms, fallback_total_tokens):
+        active_tokens, total_tokens, full_compute = self._get_step_activity_counts(fallback_total_tokens)
+        self.step_trace.append({
+            'step': int(step),
+            'step_text': f'{int(step):02d}/{int(total_steps) - 1:02d}',
+            'phase': str(phase),
+            'active_tokens': int(active_tokens),
+            'total_tokens': int(total_tokens),
+            'active_ratio': float(active_tokens / max(total_tokens, 1)),
+            'full_compute': bool(full_compute),
+            'anchor_gap': int(self.current_anchor_gap),
+            'next_anchor_step': None if self.next_anchor_step is None else int(self.next_anchor_step),
+            'latency_ms': round(float(latency_ms), 4),
+            'text': (
+                f'step {int(step):02d}: '
+                f'active {int(active_tokens)}/{int(total_tokens)} '
+                f'latency {float(latency_ms):.4f} ms '
+                f'phase={phase} '
+                f'anchor_gap={int(self.current_anchor_gap)} '
+                f'next_anchor={self.next_anchor_step}'
+            ),
+        })
+
+    def _get_step_activity_counts(self, fallback_total_tokens):
+        if self.current_step_plan is not None:
+            active_tokens = int(self.current_step_plan.active_token_indices.numel())
+            if self.current_step_plan.is_full_compute:
+                total_tokens = (
+                    int(self.current_partition.total_tokens)
+                    if self.current_partition is not None
+                    else int(max(fallback_total_tokens, active_tokens))
+                )
+                return total_tokens, total_tokens, True
+
+            frozen_tokens = int(self.current_step_plan.frozen_token_indices.numel())
+            total_tokens = active_tokens + frozen_tokens
+            if total_tokens <= 0:
+                total_tokens = int(fallback_total_tokens)
+            return active_tokens, total_tokens, False
+
+        total_tokens = int(fallback_total_tokens)
+        return total_tokens, total_tokens, True
 
     def _normalize_t_to_unit_interval(self, t):
         """Normalize scheduler timestep to [0, 1] expected by monitor equations."""

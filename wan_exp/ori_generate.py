@@ -25,7 +25,8 @@ from dist.parallel_state import (
 
 init_timer()
 
-PROMPT = "Two anthropomorphic cats in comfy boxing gear and bright gloves fight intensely on a spotlighted stage."
+#PROMPT = "Two anthropomorphic cats in comfy boxing gear and bright gloves fight intensely on a spotlighted stage."
+PROMPT = "A couple in formal evening wear going home get caught in a heavy downpour with umbrellas, zoom in"
 
 TAG = "ori"
 

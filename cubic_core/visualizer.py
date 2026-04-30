@@ -118,18 +118,9 @@ class PartitionVisualizer:
         lines.append('curvature_stats=' + self._format_stats(curvatures, scientific=True))
 
         if intervals:
-            configured_tau_min = int(getattr(self.config, 'tau_min', 1))
-            configured_tau_max = int(
-                min(
-                    int(getattr(self.config, 'tau_max', 10)),
-                    int(getattr(self.config, 'anchor_interval', getattr(self.config, 'tau_max', 10))),
-                )
-            )
             token_arr = np.asarray(token_counts, dtype=np.float64)
             tau_arr = np.asarray(intervals, dtype=np.float64)
             total_tokens = float(np.sum(token_arr))
-            lines.append(f'configured_tau_min={configured_tau_min}')
-            lines.append(f'configured_tau_max={configured_tau_max}')
             lines.append(f'assigned_tau_min={min(intervals)}')
             lines.append(f'assigned_tau_max={max(intervals)}')
             lines.append(f'{block_value_label}_stats=' + self._format_stats(intervals))

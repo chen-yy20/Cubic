@@ -35,7 +35,6 @@ class SelectiveStepScheduler:
         self.config = config
         self.warmup_fraction = float(getattr(config, 'warmup_fraction', 0.15))
         self.cooldown_fraction = float(getattr(config, 'cooldown_fraction', 0.15))
-        self.anchor_interval = int(getattr(config, 'anchor_interval', 8))
 
     def build_step_plan(
         self,
@@ -82,9 +81,15 @@ class SelectiveStepScheduler:
             block_intervals=block_intervals or {},
             selective_step_idx=step_idx if selective_step_idx is None else selective_step_idx,
         )
+        kv_cache_block_ids = [
+            block_id
+            for block_id in active_block_ids
+            if int((block_intervals or {}).get(block_id, 1)) != 1
+        ]
 
         token_indices_by_block = partition.get_all_token_indices()
         active_token_indices = self._concat_block_tokens(active_block_ids, token_indices_by_block)
+        kv_cache_token_indices = self._concat_block_tokens(kv_cache_block_ids, token_indices_by_block)
         frozen_mask = torch.ones(total_tokens, dtype=torch.bool)
         if active_token_indices.numel() > 0:
             frozen_mask[active_token_indices] = False
@@ -105,6 +110,7 @@ class SelectiveStepScheduler:
             active_token_indices=active_token_indices,
             frozen_token_indices=frozen_token_indices,
             is_full_compute=False,
+            kv_cache_token_indices=kv_cache_token_indices,
         )
 
     def build_sequence_mask(self, step_plan: StepPlan, seq_len: Optional[int] = None) -> torch.Tensor:
@@ -172,9 +178,6 @@ class SelectiveStepScheduler:
             tau = max(1, tau)
             if selective_step_idx % tau == 0:
                 active_block_ids.append(block.block_id)
-        if not active_block_ids:
-            # Ensure at least one block is active to keep the step numerically stable.
-            active_block_ids.append(partition.blocks[0].block_id)
         return active_block_ids
 
     @staticmethod

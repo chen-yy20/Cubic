@@ -53,15 +53,46 @@ from utils.timer import (
 init_timer()
 
 TAG = 'teacache'
-PROMPT = (
-    'Two anthropomorphic cats in comfy boxing gear and bright gloves fight intensely '
-    'on a spotlighted stage.'
-)
+# PROMPT = (
+#     'Two anthropomorphic cats in comfy boxing gear and bright gloves fight intensely '
+#     'on a spotlighted stage.'
+# )
+PROMPT = "A couple in formal evening wear going home get caught in a heavy downpour with umbrellas, zoom in"
+
 
 REQUIRED_TIMER_NAMES = [
     'generate_e2e',
     'model_forward',
 ]
+
+
+def _build_compute_skip_metrics(condition_sequence, uncond_sequence):
+    condition_sequence = [int(v) for v in condition_sequence]
+    uncond_sequence = [int(v) for v in uncond_sequence]
+    return {
+        'teacache_compute_skip': {
+            'condition': condition_sequence,
+            'uncond': uncond_sequence,
+            'condition_text': ' '.join(str(v) for v in condition_sequence),
+            'uncond_text': ' '.join(str(v) for v in uncond_sequence),
+            'condition_compute_steps': int(sum(condition_sequence)),
+            'condition_skip_steps': int(len(condition_sequence) - sum(condition_sequence)),
+            'uncond_compute_steps': int(sum(uncond_sequence)),
+            'uncond_skip_steps': int(len(uncond_sequence) - sum(uncond_sequence)),
+        }
+    }
+
+
+def _merge_quality_and_skip_metrics(quality_metrics, condition_sequence, uncond_sequence):
+    merged = dict(quality_metrics) if isinstance(quality_metrics, dict) else {}
+    merged.update(_build_compute_skip_metrics(condition_sequence, uncond_sequence))
+    return merged
+
+
+def _print_compute_skip_sequences(condition_sequence, uncond_sequence):
+    print('TeaCache compute/skip sequence:', flush=True)
+    print(f"condition: {' '.join(str(int(v)) for v in condition_sequence)}", flush=True)
+    print(f"uncond:    {' '.join(str(int(v)) for v in uncond_sequence)}", flush=True)
 
 
 def _resolve_model_defaults(model_path):
@@ -130,6 +161,8 @@ def apply_teacache_to_model(model_cls, ckpt_dir, sample_steps, teacache_thresh, 
     model_cls.previous_e0_odd = None
     model_cls.previous_residual_even = None
     model_cls.previous_residual_odd = None
+    model_cls.compute_skip_condition = []
+    model_cls.compute_skip_uncond = []
     model_cls.use_ref_steps = use_ret_steps
     if use_ret_steps:
         if '1.3B' in ckpt_dir:
@@ -295,6 +328,7 @@ def teacache_forward(
                     should_calc_even = True
                     self.accumulated_rel_l1_distance_even = 0
             self.previous_e0_even = modulated_inp.clone()
+            self.compute_skip_condition.append(int(should_calc_even))
         else:
             self.is_even = False
             if self.cnt < self.ret_steps or self.cnt >= self.cutoff_steps:
@@ -313,6 +347,7 @@ def teacache_forward(
                     should_calc_odd = True
                     self.accumulated_rel_l1_distance_odd = 0
             self.previous_e0_odd = modulated_inp.clone()
+            self.compute_skip_uncond.append(int(should_calc_odd))
 
     if self.enable_teacache:
         if self.is_even:
@@ -795,6 +830,7 @@ def generate(args):
         args.base_seed = base_seed[0]
 
     quality_metrics = None
+    compute_skip_metrics = None
 
     if 't2v' in args.task or 't2i' in args.task:
         logging.info(f'Input prompt: {args.prompt}')
@@ -920,25 +956,36 @@ def generate(args):
             output_dir=output_dir,
         )
         quality_metrics = quality_result['metrics'] if quality_result is not None else None
+        model_cls = wan_t2v.model.__class__ if ('t2v' in args.task or 't2i' in args.task) else wan_i2v.model.__class__
+        compute_skip_metrics = _build_compute_skip_metrics(
+            getattr(model_cls, 'compute_skip_condition', []),
+            getattr(model_cls, 'compute_skip_uncond', []),
+        )
 
         logging.info('Finished.')
         args.output_dir = output_dir
-        return quality_metrics
+        return quality_metrics, compute_skip_metrics
 
     logging.info('Finished.')
-    return None
+    return None, compute_skip_metrics
 
 
 if __name__ == '__main__':
     os.chdir(_CUBIC_ROOT)
 
     args = _parse_args()
-    quality_metrics = generate(args)
+    quality_metrics, compute_skip_metrics = generate(args)
 
     print_time_statistics(timer_names=REQUIRED_TIMER_NAMES)
 
     rank = int(os.getenv('RANK', 0))
     if rank == 0:
+        compute_skip_payload = compute_skip_metrics or _build_compute_skip_metrics([], [])
+        skip_sequences = compute_skip_payload['teacache_compute_skip']
+        _print_compute_skip_sequences(
+            skip_sequences['condition'],
+            skip_sequences['uncond'],
+        )
         out_dir = args.output_dir
         save_time_stats_to_file(
             os.path.join(out_dir, 'timing_stats.txt'),
@@ -962,6 +1009,10 @@ if __name__ == '__main__':
             TAG,
             params,
             get_time_statistics_dict(timer_names=REQUIRED_TIMER_NAMES),
-            quality_metrics=quality_metrics,
+            quality_metrics=_merge_quality_and_skip_metrics(
+                quality_metrics,
+                skip_sequences['condition'],
+                skip_sequences['uncond'],
+            ),
         )
         print(f'Params & metrics saved to {params_path}', flush=True)

@@ -76,12 +76,10 @@ class WanSelectiveForwardEngine:
             context_clip = model.img_emb(clip_fea)
             context = torch.concat([context_clip, context], dim=1)
 
-        # Decide full vs selective path.
-        use_selective = (
-            step_plan is not None
-            and (not step_plan.is_full_compute)
-            and step_plan.active_token_indices.numel() > 0
-        )
+        # Decide full vs selective path. A selective step may intentionally have
+        # zero active tokens; in that case we reuse the full-sequence residual
+        # cache and only run the current timestep head.
+        use_selective = step_plan is not None and (not step_plan.is_full_compute)
 
         if use_selective:
             active_idx = step_plan.active_token_indices.long().to(device)
@@ -102,6 +100,37 @@ class WanSelectiveForwardEngine:
             )
             return out
 
+        if int(active_idx.numel()) == 0:
+            out = self._cached_residual_forward(
+                model=model,
+                x_full=x_full,
+                e=e,
+                grid_sizes=grid_sizes,
+                branch_key=branch_key,
+            )
+            if out is not None:
+                logging.info(
+                    '[wan-selective] branch=%s active_tokens=0 frozen_tokens=%d cache=reuse_full_sequence',
+                    branch_key,
+                    total_tokens,
+                )
+                return out
+            logging.info(
+                '[wan-selective] branch=%s residual cache missing; fallback to full forward.',
+                branch_key,
+            )
+            return self._full_forward_and_refresh_cache(
+                model=model,
+                x_full=x_full,
+                e=e,
+                e0=e0,
+                seq_lens=seq_lens,
+                grid_sizes=grid_sizes,
+                context=context,
+                context_lens=context_lens,
+                branch_key=branch_key,
+            )
+
         # Selective path requires existing cache for frozen tokens.
         if not self._has_cache(model, branch_key):
             logging.info(
@@ -120,11 +149,17 @@ class WanSelectiveForwardEngine:
                 branch_key=branch_key,
             )
 
+        kv_cache_token_indices = getattr(step_plan, 'kv_cache_token_indices', step_plan.active_token_indices)
+        kv_cache_update_positions = self._active_positions_for_tokens(
+            active_idx=active_idx,
+            token_indices=kv_cache_token_indices.long().to(device),
+        )
         logging.info(
-            '[wan-selective] branch=%s active_tokens=%d frozen_tokens=%d',
+            '[wan-selective] branch=%s active_tokens=%d frozen_tokens=%d kv_cache_updates=%d',
             branch_key,
             int(step_plan.active_token_indices.numel()),
             int(step_plan.frozen_token_indices.numel()),
+            int(kv_cache_update_positions.numel()),
         )
 
         x_active = x_full.index_select(1, active_idx)
@@ -142,6 +177,7 @@ class WanSelectiveForwardEngine:
                 context_lens=context_lens,
                 branch_key=branch_key,
                 layer_idx=layer_idx,
+                kv_cache_update_positions=kv_cache_update_positions,
             )
 
         residual_cache = self.residual_cache.get(branch_key)
@@ -170,6 +206,23 @@ class WanSelectiveForwardEngine:
         updated_residual[active_idx] = x_active[0] - x_full[0, active_idx]
         self.residual_cache[branch_key] = updated_residual.detach()
 
+        out_full = model.head(hidden_full.unsqueeze(0), e)[0]
+        denoised = model.unpatchify(out_full.unsqueeze(0), grid_sizes)
+        return [u.float() for u in denoised]
+
+    def _cached_residual_forward(
+        self,
+        model,
+        x_full,
+        e,
+        grid_sizes,
+        branch_key: str,
+    ):
+        residual_cache = self.residual_cache.get(branch_key)
+        if residual_cache is None or residual_cache.size(0) != x_full.size(1):
+            return None
+
+        hidden_full = x_full[0] + residual_cache.to(x_full.device)
         out_full = model.head(hidden_full.unsqueeze(0), e)[0]
         denoised = model.unpatchify(out_full.unsqueeze(0), grid_sizes)
         return [u.float() for u in denoised]
@@ -225,6 +278,7 @@ class WanSelectiveForwardEngine:
         context_lens,
         branch_key: str,
         layer_idx: int,
+        kv_cache_update_positions=None,
     ):
         with torch.cuda.amp.autocast(dtype=torch.float32):
             e0, e1, e2, e3, e4, e5 = (block.modulation + e_time).chunk(6, dim=1)
@@ -253,13 +307,30 @@ class WanSelectiveForwardEngine:
 
         k_cache = k_cache.to(q.device)
         v_cache = v_cache.to(v_active.device)
-        k_cache[active_idx] = k_active[0]
-        v_cache[active_idx] = v_active[0]
-        self.k_cache[k_key] = k_cache.detach()
-        self.v_cache[v_key] = v_cache.detach()
+        if kv_cache_update_positions is None:
+            kv_cache_update_positions = torch.arange(active_len, device=active_idx.device, dtype=torch.long)
+        else:
+            kv_cache_update_positions = kv_cache_update_positions.to(active_idx.device)
 
-        k_full = k_cache.unsqueeze(0)
-        v_full = v_cache.unsqueeze(0)
+        cache_update_count = int(kv_cache_update_positions.numel())
+        if cache_update_count == active_len:
+            k_cache[active_idx] = k_active[0]
+            v_cache[active_idx] = v_active[0]
+            self.k_cache[k_key] = k_cache.detach()
+            self.v_cache[v_key] = v_cache.detach()
+            k_full = k_cache.unsqueeze(0)
+            v_full = v_cache.unsqueeze(0)
+        else:
+            if cache_update_count > 0:
+                cache_update_idx = active_idx.index_select(0, kv_cache_update_positions)
+                k_cache[cache_update_idx] = k_active[0].index_select(0, kv_cache_update_positions)
+                v_cache[cache_update_idx] = v_active[0].index_select(0, kv_cache_update_positions)
+                self.k_cache[k_key] = k_cache.detach()
+                self.v_cache[v_key] = v_cache.detach()
+            k_full = k_cache.unsqueeze(0).clone()
+            v_full = v_cache.unsqueeze(0).clone()
+            k_full[0, active_idx] = k_active[0]
+            v_full[0, active_idx] = v_active[0]
 
         q_lens = torch.tensor([active_len], dtype=torch.long)
         k_lens = torch.tensor([total_tokens], dtype=torch.long)
@@ -301,6 +372,25 @@ class WanSelectiveForwardEngine:
             if (branch_key, layer_idx) not in self.v_cache:
                 return False
         return True
+
+    @staticmethod
+    def _active_positions_for_tokens(active_idx, token_indices):
+        if active_idx.numel() == 0 or token_indices.numel() == 0:
+            return torch.empty(0, device=active_idx.device, dtype=torch.long)
+        if token_indices.numel() == active_idx.numel() and torch.equal(token_indices, active_idx):
+            return torch.arange(active_idx.numel(), device=active_idx.device, dtype=torch.long)
+
+        positions = torch.searchsorted(active_idx, token_indices)
+        in_bounds = positions < active_idx.numel()
+        if not bool(in_bounds.any()):
+            return torch.empty(0, device=active_idx.device, dtype=torch.long)
+
+        positions = positions[in_bounds]
+        token_indices = token_indices[in_bounds]
+        matches = active_idx.index_select(0, positions) == token_indices
+        if not bool(matches.any()):
+            return torch.empty(0, device=active_idx.device, dtype=torch.long)
+        return positions[matches]
 
     def _rope_apply_indexed(self, x, token_indices, grid_size, freqs):
         # x shape: [1, L_active, num_heads, head_dim]

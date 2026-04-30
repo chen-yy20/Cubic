@@ -26,11 +26,11 @@ from utils.timer import get_time_statistics_dict, init_timer, print_time_statist
 init_timer()
 
 PROMPT = 'Two anthropomorphic cats in comfy boxing gear and bright gloves fight intensely on a spotlighted stage.'
+# PROMPT = "A couple in formal evening wear going home get caught in a heavy downpour with umbrellas, zoom in"
 # Cubic optimizer / scheduler knobs
-SPEEDUP =2
-WARMUP = 5
-COOLDOWN = 5
-ANCHOR_INTERVAL = 8
+SPEEDUP =4
+WARMUP = 9
+COOLDOWN = 1
 VISUALIZE = False
 alpha = 2
 beta = 4
@@ -48,6 +48,28 @@ REQUIRED_TIMER_NAMES = [
 ]
 
 
+def _build_step_latency_metrics(step_trace):
+    trace = [dict(item) for item in step_trace]
+    return {
+        'cubic_step_trace': {
+            'steps': trace,
+            'text_lines': [item['text'] for item in trace],
+        }
+    }
+
+
+def _merge_quality_and_step_metrics(quality_metrics, step_trace):
+    merged = dict(quality_metrics) if isinstance(quality_metrics, dict) else {}
+    merged.update(_build_step_latency_metrics(step_trace))
+    return merged
+
+
+def _print_step_latency_trace(step_trace):
+    print('Cubic per-step latency / active tokens:', flush=True)
+    for item in step_trace:
+        print(item['text'], flush=True)
+
+
 def _resolve_model_defaults(model_path):
     if '1.3B' in model_path:
         return 't2v-1.3B', '832*480', '1.3B'
@@ -56,7 +78,24 @@ def _resolve_model_defaults(model_path):
 
 def _default_output_dir(model_path):
     _, _, model_id = _resolve_model_defaults(model_path)
-    return f'./results/wan/{model_id}/cubic/{get_prompt_id(PROMPT)}_{SPEEDUP}x_a{alpha}_b{beta}'
+    return (
+        f'./results/wan/{model_id}/cubic/'
+        f'{get_prompt_id(PROMPT)}_{SPEEDUP}x_a{alpha}_b{beta}_dynanchor_bcmean'
+    )
+
+
+def _default_origin_reference_path(model_path, prompt, task):
+    _, _, model_id = _resolve_model_defaults(model_path)
+    prompt_id = get_prompt_id(prompt)
+    return os.path.join(
+        '.',
+        'results',
+        'wan',
+        model_id,
+        'ori',
+        prompt_id,
+        f'ori_{prompt_id}_{task}.mp4',
+    )
 
 rank = int(os.getenv('RANK', 0))
 world_size = int(os.getenv('WORLD_SIZE', 1))
@@ -276,18 +315,16 @@ def generate(args):
     cfg.target_speedup = float(SPEEDUP)
     cfg.warmup_fraction = max(0.0, min(1.0, float(WARMUP) / float(total_steps)))
     cfg.cooldown_fraction = max(0.0, min(1.0, float(COOLDOWN) / float(total_steps)))
-    cfg.anchor_interval = max(1, int(ANCHOR_INTERVAL))
     cfg.alpha = float(alpha)
     cfg.beta = float(beta)
 
     logging.info(f'Generation job args: {args}')
     logging.info(f'Generation model config: {cfg}')
     logging.info(
-        'Cubic config override: target_speedup=%.3f warmup_fraction=%.4f cooldown_fraction=%.4f anchor_interval=%d',
+        'Cubic config override: target_speedup=%.3f warmup_fraction=%.4f cooldown_fraction=%.4f dynamic_anchor=2x_tau_max curvature_aggregation=mean',
         float(cfg.target_speedup),
         float(cfg.warmup_fraction),
         float(cfg.cooldown_fraction),
-        int(cfg.anchor_interval),
     )
 
     if dist.is_initialized():
@@ -321,6 +358,7 @@ def generate(args):
         eval_straightness=args.straightness_eval,
         enable_visualization=args.enable_visualization,
     )
+    step_trace = wan_t2v.get_step_trace()
 
     if cur_rank == 0:
         filename = f'{TAG}_{get_prompt_id(PROMPT)}_{args.task}.mp4'
@@ -337,29 +375,37 @@ def generate(args):
             value_range=(-1, 1),
         )
 
+        baseline_path = _default_origin_reference_path(
+            model_path=args.ckpt_dir,
+            prompt=args.prompt,
+            task=args.task,
+        )
         quality_result = evaluate_quality_with_origin(
             image_path=args.save_file,
             tag=TAG,
             save_metrics=False,
-            baseline_path=None,
-            output_dir=args.output_dir,
+            baseline_path=baseline_path,
+            output_dir=None,
         )
         quality_metrics = quality_result['metrics'] if quality_result is not None else None
 
         logging.info('Finished.')
-        return quality_metrics
+        return quality_metrics, _build_step_latency_metrics(step_trace)
 
     logging.info('Finished.')
-    return None
+    return None, _build_step_latency_metrics(step_trace)
 
 
 if __name__ == '__main__':
     args = _parse_args()
-    quality_metrics = generate(args)
+    quality_metrics, step_metrics = generate(args)
     print_time_statistics(timer_names=REQUIRED_TIMER_NAMES)
 
     cur_rank = int(os.getenv('RANK', 0))
     if cur_rank == 0:
+        step_trace_payload = step_metrics or _build_step_latency_metrics([])
+        step_trace = step_trace_payload['cubic_step_trace']['steps']
+        _print_step_latency_trace(step_trace)
         save_time_stats_to_file(
             os.path.join(args.output_dir, 'timing_stats.txt'),
             timer_names=REQUIRED_TIMER_NAMES,
@@ -374,12 +420,17 @@ if __name__ == '__main__':
             'task': args.task,
             'size': args.size,
             'base_seed': args.base_seed,
+            'curvature_aggregation': 'mean',
+            'dynamic_anchor': '2x_tau_max',
         }
         params_path = save_params_and_metrics(
             args.output_dir,
             TAG,
             params,
             get_time_statistics_dict(timer_names=REQUIRED_TIMER_NAMES),
-            quality_metrics=quality_metrics,
+            quality_metrics=_merge_quality_and_step_metrics(
+                quality_metrics,
+                step_trace,
+            ),
         )
         print(f'Params & metrics saved to {params_path}', flush=True)

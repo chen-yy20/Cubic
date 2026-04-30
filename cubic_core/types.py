@@ -176,6 +176,7 @@ class StepPlan:
     active_token_indices: torch.Tensor
     frozen_token_indices: torch.Tensor
     is_full_compute: bool = False
+    kv_cache_token_indices: torch.Tensor = field(default_factory=lambda: torch.empty(0, dtype=torch.long))
 
     def __post_init__(self):
         # Ensure indices are on CPU and sorted
@@ -183,8 +184,12 @@ class StepPlan:
             self.active_token_indices = self.active_token_indices.cpu()
         if self.frozen_token_indices.device.type != 'cpu':
             self.frozen_token_indices = self.frozen_token_indices.cpu()
+        if self.kv_cache_token_indices.device.type != 'cpu':
+            self.kv_cache_token_indices = self.kv_cache_token_indices.cpu()
         
         if self.active_token_indices.numel() > 0:
             self.active_token_indices = torch.sort(self.active_token_indices)[0]
         if self.frozen_token_indices.numel() > 0:
             self.frozen_token_indices = torch.sort(self.frozen_token_indices)[0]
+        if self.kv_cache_token_indices.numel() > 0:
+            self.kv_cache_token_indices = torch.sort(self.kv_cache_token_indices)[0]

@@ -10,7 +10,6 @@ from __future__ import annotations
 
 from typing import Dict, Optional
 
-import numpy as np
 import torch
 import torch.nn.functional as F
 
@@ -69,74 +68,26 @@ class CurvatureMonitor:
         return self.curvature_map
 
     def get_block_curvatures(self, partition, curvature_map: Optional[torch.Tensor] = None) -> Dict[int, float]:
-        """Aggregate token curvature to block-level curvature (percentile)."""
+        """Aggregate token curvature to block-level mean curvature."""
         curv_map = self.curvature_map if curvature_map is None else curvature_map
         if curv_map is None:
             return {}
 
-        q = float(getattr(self.config, "curvature_percentile", 0.9))
-        q = min(max(q, 0.0), 1.0)
-
-        use_gpu_agg = bool(getattr(self.config, 'partition_gpu_aggregation', True))
-        if use_gpu_agg and curv_map.device.type == 'cuda':
-            selected_size = getattr(partition, 'selected_block_size', None)
-            is_uniform = bool(getattr(partition, 'is_uniform', False))
-            if is_uniform and selected_size is not None:
-                quantiles = self._uniform_block_quantiles(curv_map.detach().float(), selected_size, q)
-                out: Dict[int, float] = {}
-                q_list = quantiles.detach().cpu().tolist()
-                for idx, block in enumerate(partition):
-                    out[block.block_id] = float(q_list[idx])
-                return out
-
-        # Avoid many tiny GPU quantile kernels. Materialize once on CPU and aggregate there.
-        curv_np = curv_map.detach().float().cpu().numpy()
+        curv = curv_map.detach().float()
 
         block_curvatures: Dict[int, float] = {}
         for block in partition:
-            region = curv_np[
+            region = curv[
                 block.f_start:block.f_end,
                 block.h_start:block.h_end,
                 block.w_start:block.w_end,
             ]
-            if region.size == 0:
+            if region.numel() == 0:
                 block_curvatures[block.block_id] = 0.0
                 continue
-            block_curvatures[block.block_id] = float(np.quantile(region.reshape(-1), q))
+            block_curvatures[block.block_id] = float(region.mean().item())
 
         return block_curvatures
-
-    def _uniform_block_quantiles(
-        self,
-        curv_map: torch.Tensor,
-        block_size: tuple[int, int, int],
-        q: float,
-    ) -> torch.Tensor:
-        ft, ht, wt = curv_map.shape
-        bf, bh, bw = block_size
-        nf = (ft + bf - 1) // bf
-        nh = (ht + bh - 1) // bh
-        nw = (wt + bw - 1) // bw
-
-        pf = nf * bf
-        ph = nh * bh
-        pw = nw * bw
-
-        padded = torch.zeros((pf, ph, pw), dtype=curv_map.dtype, device=curv_map.device)
-        padded[:ft, :ht, :wt] = curv_map
-
-        mask = torch.zeros((pf, ph, pw), dtype=torch.bool, device=curv_map.device)
-        mask[:ft, :ht, :wt] = True
-
-        values = padded.view(nf, bf, nh, bh, nw, bw)
-        values = values.permute(0, 2, 4, 1, 3, 5).reshape(nf * nh * nw, bf * bh * bw)
-
-        valid = mask.view(nf, bf, nh, bh, nw, bw)
-        valid = valid.permute(0, 2, 4, 1, 3, 5).reshape(nf * nh * nw, bf * bh * bw)
-
-        values = values.masked_fill(~valid, torch.nan)
-        quantiles = torch.nanquantile(values, q, dim=1)
-        return torch.nan_to_num(quantiles, nan=0.0, posinf=0.0, neginf=0.0)
 
     def reset(self):
         """Reset monitor state before a new sampling run."""
