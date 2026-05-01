@@ -17,14 +17,50 @@ from firered.transformer import QwenImageTransformer2DModel
 from utils.launch_defaults import resolve_model_path
 from utils.quality_metric import evaluate_quality_with_origin
 from utils.results import get_prompt_id, save_params_and_metrics
-from utils.timer import get_time_statistics_dict, get_timer, init_timer, print_time_statistics
+from utils.timer import get_time_statistics_dict, init_timer, print_time_statistics, save_time_stats_to_file
 
-IMAGE_PATH = "/home/fit/zhaijdcyy/WORK/Cubic/firered_exp/examples/cola.png"
+# IMAGE_PATH = "/home/fit/zhaijdcyy/WORK/Cubic/firered_exp/examples/cola.png"
+IMAGE_PATH = "/home/chenyy/WORK/cyy/cubic/firered_exp/examples/cola.png"
+thresh = 0.2  # TeaCache 累积阈值；越大跳过越多、越快，画质风险越高（常见 0.4~0.7）
+
 PROMPT = (
     "Transform the object into a realistic miniature product by carefully holding it "
     "between your thumb and forefinger."
 )
-TAG = "teacache"
+TAG = f"teacache_{thresh}"
+REQUIRED_TIMER_NAMES = [
+    "generate_e2e",
+    "dit_forward",
+]
+
+
+def _build_compute_skip_metrics(condition_sequence, uncond_sequence):
+    condition_sequence = [int(v) for v in condition_sequence]
+    uncond_sequence = [int(v) for v in uncond_sequence]
+    return {
+        "teacache_compute_skip": {
+            "condition": condition_sequence,
+            "uncond": uncond_sequence,
+            "condition_text": " ".join(str(v) for v in condition_sequence),
+            "uncond_text": " ".join(str(v) for v in uncond_sequence),
+            "condition_compute_steps": int(sum(condition_sequence)),
+            "condition_skip_steps": int(len(condition_sequence) - sum(condition_sequence)),
+            "uncond_compute_steps": int(sum(uncond_sequence)),
+            "uncond_skip_steps": int(len(uncond_sequence) - sum(uncond_sequence)),
+        }
+    }
+
+
+def _merge_quality_and_skip_metrics(quality_metrics, condition_sequence, uncond_sequence):
+    merged = dict(quality_metrics) if isinstance(quality_metrics, dict) else {}
+    merged.update(_build_compute_skip_metrics(condition_sequence, uncond_sequence))
+    return merged
+
+
+def _print_compute_skip_sequences(condition_sequence, uncond_sequence):
+    print("TeaCache compute/skip sequence:", flush=True)
+    print(f"condition: {' '.join(str(int(v)) for v in condition_sequence)}", flush=True)
+    print(f"uncond:    {' '.join(str(int(v)) for v in uncond_sequence)}", flush=True)
 
 quality_eval = True
 
@@ -47,11 +83,11 @@ def parse_args() -> argparse.Namespace:
     parser.add_argument("--prompt", type=str, default=PROMPT)
     parser.add_argument("--seed", type=int, default=49, help="与 ori/cubic 默认一致，便于质量对比")
     parser.add_argument("--true_cfg_scale", type=float, default=4.0)
-    parser.add_argument("--num_inference_steps", type=int, default=50)
+    parser.add_argument("--num_inference_steps", type=int, default=40)
     parser.add_argument(
         "--rel_l1_thresh",
         type=float,
-        default=0.2,
+        default=thresh,
         help="TeaCache 累积阈值；越大跳过越多、越快，画质风险越高（常见 0.4~0.7）",
     )
     parser.add_argument(
@@ -113,8 +149,7 @@ def main() -> None:
     output_image_path.parent.mkdir(parents=True, exist_ok=True)
 
     print(f"Loading pipeline from {args.model_path}...", flush=True)
-    with get_timer("load_pipeline"):
-        pipeline = load_pipeline(args.model_path, args.disable_progress_bar)
+    pipeline = load_pipeline(args.model_path, args.disable_progress_bar)
     print("Pipeline loaded.", flush=True)
 
     transformer = pipeline.transformer
@@ -134,8 +169,7 @@ def main() -> None:
         output_dir,
     )
 
-    with get_timer("load_images"):
-        images = [Image.open(p).convert("RGB") for p in args.input_image]
+    images = [Image.open(p).convert("RGB") for p in args.input_image]
     logging.info("[firered-teacache] loaded_images=%d", len(images))
 
     inputs = {
@@ -148,28 +182,34 @@ def main() -> None:
         "num_images_per_prompt": 1,
     }
 
-    with get_timer("inference_first"):
-        with torch.inference_mode():
-            result = pipeline(**inputs)
+    with torch.inference_mode():
+        result = pipeline(**inputs)
+
+    compute_skip = getattr(transformer, "teacache_compute_skip", {})
+    condition_sequence = list(compute_skip.get("branch_0", []))
+    uncond_sequence = list(compute_skip.get("branch_1", []))
 
     output_image = result.images[0]
-    with get_timer("save_image"):
-        output_image.save(output_image_path)
+    output_image.save(output_image_path)
 
     quality_metrics = None
     if not args.disable_quality_eval:
-        with get_timer("quality_eval"):
-            quality_result = evaluate_quality_with_origin(
-                image_path=str(output_image_path),
-                tag=TAG,
-                save_metrics=False,
-                baseline_path=None,
-                output_dir=str(output_dir),
-            )
+        quality_result = evaluate_quality_with_origin(
+            image_path=str(output_image_path),
+            tag=TAG,
+            save_metrics=False,
+            baseline_path=None,
+            output_dir=str(output_dir),
+        )
         quality_metrics = quality_result["metrics"] if quality_result is not None else None
 
     print("Image saved at:", output_image_path.resolve(), flush=True)
-    print_time_statistics()
+    _print_compute_skip_sequences(condition_sequence, uncond_sequence)
+    print_time_statistics(timer_names=REQUIRED_TIMER_NAMES)
+    save_time_stats_to_file(
+        str(output_dir / "timing_stats.txt"),
+        timer_names=REQUIRED_TIMER_NAMES,
+    )
 
     params = {
         "model": "firered",
@@ -190,8 +230,12 @@ def main() -> None:
         str(output_dir),
         TAG,
         params,
-        get_time_statistics_dict(),
-        quality_metrics=quality_metrics,
+        get_time_statistics_dict(timer_names=REQUIRED_TIMER_NAMES),
+        quality_metrics=_merge_quality_and_skip_metrics(
+            quality_metrics,
+            condition_sequence,
+            uncond_sequence,
+        ),
     )
     print(f"Params & metrics saved to {params_path}", flush=True)
 

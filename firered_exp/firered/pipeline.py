@@ -787,26 +787,26 @@ class QwenImageEditPlusPipeline(DiffusionPipeline, QwenImageLoraLoaderMixin):
 
         # 6. Denoising loop
         self.scheduler.set_begin_index(0)
-        with self.progress_bar(total=num_inference_steps) as progress_bar:
-            progress_bar.set_description("Denoising")
-            for i, t in enumerate(timesteps):
-                if i % 5 == 0:
-                    print(f"Denoising step: {i}", flush=True)
+        with get_timer("generate_e2e"):
+            with self.progress_bar(total=num_inference_steps) as progress_bar:
+                progress_bar.set_description("Denoising")
+                for i, t in enumerate(timesteps):
+                    if i % 5 == 0:
+                        print(f"Denoising step: {i}", flush=True)
 
-                if self.interrupt:
-                    continue
+                    if self.interrupt:
+                        continue
 
-                self._current_timestep = t
+                    self._current_timestep = t
 
-                latent_model_input = latents
-                if image_latents is not None:
-                    latent_model_input = torch.cat([latents, image_latents], dim=1)
+                    latent_model_input = latents
+                    if image_latents is not None:
+                        latent_model_input = torch.cat([latents, image_latents], dim=1)
 
-                # broadcast to batch dimension in a way that's compatible with ONNX/Core ML
-                timestep = t.expand(latents.shape[0]).to(latents.dtype)
-                with get_timer("full_forward"):
+                    # broadcast to batch dimension in a way that's compatible with ONNX/Core ML
+                    timestep = t.expand(latents.shape[0]).to(latents.dtype)
                     with self.transformer.cache_context("cond"):
-                        with get_timer("dit_fw"):
+                        with get_timer("dit_forward"):
                             noise_pred = self.transformer(
                                 hidden_states=latent_model_input,
                                 timestep=timestep / 1000,
@@ -821,7 +821,7 @@ class QwenImageEditPlusPipeline(DiffusionPipeline, QwenImageLoraLoaderMixin):
 
                     if do_true_cfg:
                         with self.transformer.cache_context("uncond"):
-                            with get_timer("dit_fw"):
+                            with get_timer("dit_forward"):
                                 neg_noise_pred = self.transformer(
                                     hidden_states=latent_model_input,
                                     timestep=timestep / 1000,
@@ -839,14 +839,14 @@ class QwenImageEditPlusPipeline(DiffusionPipeline, QwenImageLoraLoaderMixin):
                         noise_norm = torch.norm(comb_pred, dim=-1, keepdim=True)
                         noise_pred = comb_pred * (cond_norm / noise_norm)
 
-                # compute the previous noisy sample x_t -> x_t-1
-                latents_dtype = latents.dtype
-                latents = self.scheduler.step(noise_pred, t, latents, return_dict=False)[0]
+                    # compute the previous noisy sample x_t -> x_t-1
+                    latents_dtype = latents.dtype
+                    latents = self.scheduler.step(noise_pred, t, latents, return_dict=False)[0]
 
-                if latents.dtype != latents_dtype:
-                    if torch.backends.mps.is_available():
-                        # some platforms (eg. apple mps) misbehave due to a pytorch bug: https://github.com/pytorch/pytorch/pull/99272
-                        latents = latents.to(latents_dtype)
+                    if latents.dtype != latents_dtype:
+                        if torch.backends.mps.is_available():
+                            # some platforms (eg. apple mps) misbehave due to a pytorch bug: https://github.com/pytorch/pytorch/pull/99272
+                            latents = latents.to(latents_dtype)
 
                 if callback_on_step_end is not None:
                     callback_kwargs = {}

@@ -57,6 +57,10 @@ def _reset_teacache_runtime(self) -> None:
         "branch_0": _make_branch_state(),
         "branch_1": _make_branch_state(),
     }
+    self.teacache_compute_skip = {
+        "branch_0": [],
+        "branch_1": [],
+    }
 
 
 def _ensure_teacache_runtime(self) -> None:
@@ -247,6 +251,11 @@ def teacache_forward(
             used_cache = True
         else:
             should_calc = True
+
+    if enable_teacache:
+        compute_skip = getattr(self, "teacache_compute_skip", None)
+        if isinstance(compute_skip, dict):
+            compute_skip.setdefault(branch_key, []).append(int(should_calc))
 
     if not used_cache:
         ori_encoder_hidden_states = encoder_hidden_states.detach().to(cache_device)

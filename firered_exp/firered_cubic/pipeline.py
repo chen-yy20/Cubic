@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import logging
+import time
 from collections import Counter
 from dataclasses import dataclass
 from typing import Any, Callable
@@ -71,9 +72,8 @@ class CubicQwenImageEditPlusPipeline(QwenImageEditPlusPipeline):
             transformer=transformer,
         )
 
-        self.phase_warmup_fraction = 0.15
-        self.phase_cooldown_fraction = 0.15
-        self.phase_anchor_interval = 8
+        self.phase_warmup_steps = 4
+        self.phase_cooldown_steps = 4
 
         self.target_speedup = 2.0
         self.cond_target_speedup = 2.0
@@ -84,6 +84,7 @@ class CubicQwenImageEditPlusPipeline(QwenImageEditPlusPipeline):
 
         self.patch_size = (1, 2, 2)
         self.curvature_percentile = 0.9
+        self.condition_complexity_percentile = 0.7
         self.curvature_contrast_gamma = 1.8
         self.tau_diversity_target_span = 2.0
         self.tau_diversity_max_boost = 2.5
@@ -94,6 +95,7 @@ class CubicQwenImageEditPlusPipeline(QwenImageEditPlusPipeline):
         self.max_block_tokens = 256
         self.cv_threshold = 0.5
         self.max_blocksize_candidates = 36
+        self.partition_mode = "uniform" # morphology/uniform
 
         self.monitor = CurvatureMonitor(self)
         self.condition_monitor = ConditionComplexityMonitor(self)
@@ -109,14 +111,22 @@ class CubicQwenImageEditPlusPipeline(QwenImageEditPlusPipeline):
         self.current_cond_partition = None
         self.current_cond_frequency_plan = None
         self.current_cond_step_plan = None
+        self.next_anchor_step = None
+        self.current_anchor_gap = 0
         self.step_selection_history: list[StepSelectionStats] = []
+        self.step_trace: list[dict[str, Any]] = []
+
+    def _resolve_phase_steps(self, total_steps: int) -> tuple[int, int]:
+        total_steps = max(0, int(total_steps))
+        warmup_steps = max(0, min(int(self.phase_warmup_steps), total_steps))
+        cooldown_steps = max(0, min(int(self.phase_cooldown_steps), max(0, total_steps - warmup_steps)))
+        return warmup_steps, cooldown_steps
 
     def _get_inference_phase(self, step: int, total_steps: int) -> str:
         if total_steps <= 0:
             return "phase4_cooldown"
 
-        warmup_steps = max(0, int(total_steps * self.phase_warmup_fraction))
-        cooldown_steps = max(0, int(total_steps * self.phase_cooldown_fraction))
+        warmup_steps, cooldown_steps = self._resolve_phase_steps(total_steps)
         cooldown_start = max(0, total_steps - cooldown_steps)
 
         if step < warmup_steps:
@@ -124,8 +134,10 @@ class CubicQwenImageEditPlusPipeline(QwenImageEditPlusPipeline):
         if step >= cooldown_start:
             return "phase4_cooldown"
 
-        anchor_interval = max(1, int(self.phase_anchor_interval))
-        if (step - warmup_steps) % anchor_interval == 0:
+        if self.next_anchor_step is None:
+            self.next_anchor_step = warmup_steps
+
+        if step == self.next_anchor_step:
             return "phase2_cruise_anchor"
         return "phase3_cruise_selective"
 
@@ -149,6 +161,7 @@ class CubicQwenImageEditPlusPipeline(QwenImageEditPlusPipeline):
         self.partitioner.max_block_tokens = int(self.max_block_tokens)
         self.partitioner.cv_threshold = float(self.cv_threshold)
         self.partitioner.max_candidates = int(self.max_blocksize_candidates)
+        self.partitioner.partition_mode = str(self.partition_mode).lower()
 
         self.main_frequency_optimizer.target_speedup = float(self.target_speedup)
         self.main_frequency_optimizer.alpha = float(self.alpha)
@@ -167,10 +180,6 @@ class CubicQwenImageEditPlusPipeline(QwenImageEditPlusPipeline):
         self.cond_frequency_optimizer.curvature_contrast_gamma = float(self.curvature_contrast_gamma)
         self.cond_frequency_optimizer.tau_diversity_target_span = float(self.tau_diversity_target_span)
         self.cond_frequency_optimizer.tau_diversity_max_boost = float(self.tau_diversity_max_boost)
-
-        self.step_scheduler.warmup_fraction = float(self.phase_warmup_fraction)
-        self.step_scheduler.cooldown_fraction = float(self.phase_cooldown_fraction)
-        self.step_scheduler.anchor_interval = int(self.phase_anchor_interval)
 
     @staticmethod
     def _phase_to_enum(phase_name: str) -> Phase:
@@ -207,22 +216,25 @@ class CubicQwenImageEditPlusPipeline(QwenImageEditPlusPipeline):
         callback_on_step_end: Callable[[int, int], None] | None = None,
         callback_on_step_end_tensor_inputs: list[str] = ["latents"],
         max_sequence_length: int = 512,
-        cubic_warmup_fraction: float | None = None,
-        cubic_cooldown_fraction: float | None = None,
-        cubic_anchor_interval: int | None = None,
+        cubic_warmup_steps: int | None = None,
+        cubic_cooldown_steps: int | None = None,
         cubic_target_speedup: float | None = None,
         cubic_cond_target_speedup: float | None = None,
+        cubic_warmup_fraction: float | None = None,
+        cubic_cooldown_fraction: float | None = None,
         cubic_enable_visualization: bool = True,
         cubic_results_dir: str | None = None,
         cubic_visual_tag: str | None = None,
     ):
         """Run FireRed image editing with Cubic monitoring enabled."""
-        if cubic_warmup_fraction is not None:
-            self.phase_warmup_fraction = float(cubic_warmup_fraction)
-        if cubic_cooldown_fraction is not None:
-            self.phase_cooldown_fraction = float(cubic_cooldown_fraction)
-        if cubic_anchor_interval is not None:
-            self.phase_anchor_interval = int(cubic_anchor_interval)
+        if cubic_warmup_steps is not None:
+            self.phase_warmup_steps = int(cubic_warmup_steps)
+        elif cubic_warmup_fraction is not None:
+            self.phase_warmup_steps = max(0, int(num_inference_steps * float(cubic_warmup_fraction)))
+        if cubic_cooldown_steps is not None:
+            self.phase_cooldown_steps = int(cubic_cooldown_steps)
+        elif cubic_cooldown_fraction is not None:
+            self.phase_cooldown_steps = max(0, int(num_inference_steps * float(cubic_cooldown_fraction)))
         if cubic_target_speedup is not None:
             self.target_speedup = float(cubic_target_speedup)
         if cubic_cond_target_speedup is not None:
@@ -240,7 +252,10 @@ class CubicQwenImageEditPlusPipeline(QwenImageEditPlusPipeline):
         self.current_cond_partition = None
         self.current_cond_frequency_plan = None
         self.current_cond_step_plan = None
+        self.next_anchor_step = None
+        self.current_anchor_gap = 0
         self.step_selection_history = []
+        self.step_trace = []
 
         image_size = image[-1].size if isinstance(image, list) else image.size
         calculated_width, calculated_height = calculate_dimensions(1024 * 1024, image_size[0] / image_size[1])
@@ -380,8 +395,7 @@ class CubicQwenImageEditPlusPipeline(QwenImageEditPlusPipeline):
         if self.attention_kwargs is None:
             self._attention_kwargs = {}
 
-        warmup_steps = max(0, int(len(timesteps) * self.phase_warmup_fraction))
-        cooldown_steps = max(0, int(len(timesteps) * self.phase_cooldown_fraction))
+        warmup_steps, cooldown_steps = self._resolve_phase_steps(len(timesteps))
         cooldown_start = max(0, len(timesteps) - cooldown_steps)
 
         if image_latents is not None and img_shapes and img_shapes[0] and len(img_shapes[0]) > 1:
@@ -403,37 +417,35 @@ class CubicQwenImageEditPlusPipeline(QwenImageEditPlusPipeline):
                 step_idx=0,
             )
 
-            with get_timer("condition_complexity_partitioner"):
-                ft, ht, wt = cond_complexity_map.shape
-                cond_partition = self.partitioner.partition(
-                    Ft=ft,
-                    Ht=ht,
-                    Wt=wt,
-                    curvature_map=cond_complexity_map,
-                )
-                cond_partition_debug = self.partitioner.describe_partition(
-                    cond_partition,
-                    curvature_map=cond_complexity_map,
-                )
-                cond_block_curvatures = self.condition_monitor.get_block_curvatures(
-                    cond_partition,
-                    complexity_map=cond_complexity_map,
-                )
+            ft, ht, wt = cond_complexity_map.shape
+            cond_partition = self.partitioner.partition(
+                Ft=ft,
+                Ht=ht,
+                Wt=wt,
+                curvature_map=cond_complexity_map,
+            )
+            cond_partition_debug = self.partitioner.describe_partition(
+                cond_partition,
+                curvature_map=cond_complexity_map,
+            )
+            cond_block_curvatures = self.condition_monitor.get_block_curvatures(
+                cond_partition,
+                complexity_map=cond_complexity_map,
+            )
 
-            with get_timer("condition_complexity_optimizer"):
-                cond_frequency_plan = self.cond_frequency_optimizer.optimize(
-                    partition=cond_partition,
-                    block_curvatures=cond_block_curvatures,
-                )
-                self.current_cond_partition = cond_partition
-                self.current_cond_frequency_plan = cond_frequency_plan
-                self.current_cond_step_plan = self.step_scheduler.build_step_plan(
-                    partition=cond_partition,
-                    block_intervals=cond_frequency_plan.block_intervals,
-                    phase=Phase.CRUISE_ANCHOR,
-                    step_idx=0,
-                    selective_step_idx=0,
-                )
+            cond_frequency_plan = self.cond_frequency_optimizer.optimize(
+                partition=cond_partition,
+                block_curvatures=cond_block_curvatures,
+            )
+            self.current_cond_partition = cond_partition
+            self.current_cond_frequency_plan = cond_frequency_plan
+            self.current_cond_step_plan = self.step_scheduler.build_step_plan(
+                partition=cond_partition,
+                block_intervals=cond_frequency_plan.block_intervals,
+                phase=Phase.CRUISE_ANCHOR,
+                step_idx=0,
+                selective_step_idx=0,
+            )
 
             logger.info(
                 "[firered-cond-complexity] token_grid=(%d,%d,%d) chosen_block_size=%s blocks=%d mean=%.6e min=%.6e max=%.6e",
@@ -473,12 +485,12 @@ class CubicQwenImageEditPlusPipeline(QwenImageEditPlusPipeline):
             logger.info("[firered-cond-complexity] condition latents exist but no condition shape metadata found, skip cond scheduling.")
 
         logger.info(
-            "[firered-cubic] steps=%d warmup=%d cooldown=%d cooldown_start=%d anchor_interval=%d main_speedup=%.3f cond_speedup=%.3f gamma=%.3f diversity_span=%.3f",
+            "[firered-cubic] steps=%d warmup=%d cooldown=%d cooldown_start=%d dynamic_anchor=2x_tau_max partition_mode=%s main_speedup=%.3f cond_speedup=%.3f gamma=%.3f diversity_span=%.3f",
             len(timesteps),
             warmup_steps,
             cooldown_steps,
             cooldown_start,
-            int(self.phase_anchor_interval),
+            str(self.partition_mode),
             float(self.target_speedup),
             float(self.cond_target_speedup),
             float(self.curvature_contrast_gamma),
@@ -585,161 +597,271 @@ class CubicQwenImageEditPlusPipeline(QwenImageEditPlusPipeline):
                         latent_model_input = torch.cat([latents, image_latents], dim=1)
 
                     timestep = t.expand(latents.shape[0]).to(latents.dtype)
-                    with get_timer("full_forward"):
-                        with self.transformer.cache_context("cond"):
-                            noise_pred_full = self.selective_engine.forward(
-                                transformer=self.transformer,
-                                hidden_states=latent_model_input,
-                                timestep=timestep / 1000,
-                                guidance=guidance,
-                                encoder_hidden_states_mask=prompt_embeds_mask,
-                                encoder_hidden_states=prompt_embeds,
-                                img_shapes=img_shapes,
-                                attention_kwargs=self.attention_kwargs,
-                                step_plan=self.current_step_plan,
-                                cond_step_plan=self.current_cond_step_plan,
-                                cache_key="cond",
-                                main_token_count=int(latents.shape[1]),
-                                step_idx=i,
-                                step_phase=phase,
-                            )
-                        noise_pred = noise_pred_full[:, : latents.size(1)]
-
-                        if do_true_cfg:
-                            with self.transformer.cache_context("uncond"):
-                                neg_noise_pred_full = self.selective_engine.forward(
+                    step_start = self._start_step_timer()
+                    is_last_warmup = warmup_steps > 0 and phase == "phase1_warmup" and i == warmup_steps - 1
+                    is_cruise_anchor = phase == "phase2_cruise_anchor"
+                    if is_last_warmup or is_cruise_anchor:
+                        with get_timer("anchor_step_total"):
+                            with self.transformer.cache_context("cond"):
+                                noise_pred_full = self.selective_engine.forward(
                                     transformer=self.transformer,
                                     hidden_states=latent_model_input,
                                     timestep=timestep / 1000,
                                     guidance=guidance,
-                                    encoder_hidden_states_mask=negative_prompt_embeds_mask,
-                                    encoder_hidden_states=negative_prompt_embeds,
+                                    encoder_hidden_states_mask=prompt_embeds_mask,
+                                    encoder_hidden_states=prompt_embeds,
                                     img_shapes=img_shapes,
                                     attention_kwargs=self.attention_kwargs,
                                     step_plan=self.current_step_plan,
                                     cond_step_plan=self.current_cond_step_plan,
-                                    cache_key="uncond",
+                                    cache_key="cond",
                                     main_token_count=int(latents.shape[1]),
                                     step_idx=i,
                                     step_phase=phase,
                                 )
-                            neg_noise_pred = neg_noise_pred_full[:, : latents.size(1)]
-                            comb_pred = neg_noise_pred + true_cfg_scale * (noise_pred - neg_noise_pred)
+                            noise_pred = noise_pred_full[:, : latents.size(1)]
 
-                            cond_norm = torch.norm(noise_pred, dim=-1, keepdim=True)
-                            noise_norm = torch.norm(comb_pred, dim=-1, keepdim=True)
-                            noise_pred = comb_pred * (cond_norm / noise_norm)
+                            if do_true_cfg:
+                                with self.transformer.cache_context("uncond"):
+                                    neg_noise_pred_full = self.selective_engine.forward(
+                                        transformer=self.transformer,
+                                        hidden_states=latent_model_input,
+                                        timestep=timestep / 1000,
+                                        guidance=guidance,
+                                        encoder_hidden_states_mask=negative_prompt_embeds_mask,
+                                        encoder_hidden_states=negative_prompt_embeds,
+                                        img_shapes=img_shapes,
+                                        attention_kwargs=self.attention_kwargs,
+                                        step_plan=self.current_step_plan,
+                                        cond_step_plan=self.current_cond_step_plan,
+                                        cache_key="uncond",
+                                        main_token_count=int(latents.shape[1]),
+                                        step_idx=i,
+                                        step_phase=phase,
+                                    )
+                                neg_noise_pred = neg_noise_pred_full[:, : latents.size(1)]
+                                comb_pred = neg_noise_pred + true_cfg_scale * (noise_pred - neg_noise_pred)
 
-                    is_last_warmup = warmup_steps > 0 and phase == "phase1_warmup" and i == warmup_steps - 1
-                    is_cruise_anchor = phase == "phase2_cruise_anchor"
-                    if is_last_warmup or is_cruise_anchor:
-                        curvature_map = None
+                                cond_norm = torch.norm(noise_pred, dim=-1, keepdim=True)
+                                noise_norm = torch.norm(comb_pred, dim=-1, keepdim=True)
+                                noise_pred = comb_pred * (cond_norm / noise_norm)
 
-                        with get_timer("anchor_step_monitor"):
-                            latents_unpacked = self._unpack_latents(latents, height, width, self.vae_scale_factor)
-                            noise_unpacked = self._unpack_latents(noise_pred, height, width, self.vae_scale_factor)
-                            curvature_map = self.monitor.update(
-                                x=latents_unpacked,
-                                v=noise_unpacked,
-                                t=self._normalize_t_to_unit_interval(t),
-                                step_idx=i,
-                            )
+                            curvature_map = None
 
-                        if curvature_map is not None:
-                            logger.info(
-                                "[firered-monitor] step=%d curvature_map=%s mean=%.6e min=%.6e max=%.6e",
-                                i,
-                                tuple(curvature_map.shape),
-                                float(curvature_map.float().mean().item()),
-                                float(curvature_map.float().amin().item()),
-                                float(curvature_map.float().amax().item()),
-                            )
-                            with get_timer("anchor_step_partitioner"):
-                                ft, ht, wt = curvature_map.shape
-                                partition = self.partitioner.partition(
-                                    Ft=ft,
-                                    Ht=ht,
-                                    Wt=wt,
-                                    curvature_map=curvature_map,
-                                )
-                                partition_debug = self.partitioner.describe_partition(
-                                    partition,
-                                    curvature_map=curvature_map,
-                                )
-                                block_curvatures = self.monitor.get_block_curvatures(
-                                    partition,
-                                    curvature_map=curvature_map,
-                                )
-
-                            logger.info(
-                                "[firered-partitioner] step=%d chosen_block_size=%s blocks=%d token_grid=(%d,%d,%d) token_stats(min=%d max=%d mean=%.2f) block_cv(mean=%.4f p90=%.4f)",
-                                i,
-                                partition_debug.chosen_block_size,
-                                partition_debug.block_count,
-                                ft,
-                                ht,
-                                wt,
-                                partition_debug.block_token_min,
-                                partition_debug.block_token_max,
-                                partition_debug.block_token_mean,
-                                partition_debug.mean_block_cv,
-                                partition_debug.p90_block_cv,
-                            )
-
-                            with get_timer("anchor_step_optimizer"):
-                                frequency_plan = self.main_frequency_optimizer.optimize(
-                                    partition=partition,
-                                    block_curvatures=block_curvatures,
-                                )
-                                self.current_partition = partition
-                                self.current_frequency_plan = frequency_plan
-                                self.current_step_plan = self.step_scheduler.build_step_plan(
-                                    partition=partition,
-                                    block_intervals=frequency_plan.block_intervals,
-                                    phase=Phase.CRUISE_ANCHOR,
+                            with get_timer("anchor_step_monitor"):
+                                latents_unpacked = self._unpack_latents(latents, height, width, self.vae_scale_factor)
+                                noise_unpacked = self._unpack_latents(noise_pred, height, width, self.vae_scale_factor)
+                                curvature_map = self.monitor.update(
+                                    x=latents_unpacked,
+                                    v=noise_unpacked,
+                                    t=self._normalize_t_to_unit_interval(t),
                                     step_idx=i,
-                                    selective_step_idx=max(0, i - warmup_steps),
                                 )
 
-                            logger.info(
-                                "[firered-optimizer] step=%d config_tau(min=%d max=%d) assigned_tau(min=%d max=%d mean=%.3f) mean_update_rate=%.6f achieved_speedup=%.3f histogram=%s",
-                                i,
-                                int(getattr(self.main_frequency_optimizer, "tau_min", 1)),
-                                int(getattr(self.main_frequency_optimizer, "tau_max", 10)),
-                                frequency_plan.min_interval,
-                                frequency_plan.max_interval,
-                                frequency_plan.mean_interval,
-                                frequency_plan.mean_update_rate,
-                                frequency_plan.achieved_speedup,
-                                self._format_interval_histogram(frequency_plan.block_intervals),
-                            )
-
-                            if cubic_enable_visualization and cubic_results_dir:
-                                self.visualizer.visualize_partition_and_frequency(
-                                    partition=partition,
-                                    curvature_map=curvature_map,
-                                    block_curvatures=block_curvatures,
-                                    block_intervals=frequency_plan.block_intervals,
-                                    step_idx=i,
-                                    output_dir=cubic_results_dir,
-                                    file_suffix=f"{cubic_visual_tag}_main" if cubic_visual_tag else "main",
-                                )
+                            if curvature_map is not None:
                                 logger.info(
-                                    "[firered-visual] step=%d partition visualization exported to %s/partition_vis",
+                                    "[firered-monitor] step=%d curvature_map=%s mean=%.6e min=%.6e max=%.6e",
                                     i,
-                                    cubic_results_dir,
+                                    tuple(curvature_map.shape),
+                                    float(curvature_map.float().mean().item()),
+                                    float(curvature_map.float().amin().item()),
+                                    float(curvature_map.float().amax().item()),
                                 )
-                        else:
-                            logger.info(
-                                "[firered-monitor] step=%d first anchor collected; waiting for next anchor to form drift-based curvature.",
-                                i,
-                            )
+                                with get_timer("anchor_step_partitioner"):
+                                    ft, ht, wt = curvature_map.shape
+                                    partition = self.partitioner.partition(
+                                        Ft=ft,
+                                        Ht=ht,
+                                        Wt=wt,
+                                        curvature_map=curvature_map,
+                                    )
+                                    partition_debug = self.partitioner.describe_partition(
+                                        partition,
+                                        curvature_map=curvature_map,
+                                    )
+                                    block_curvatures = self.monitor.get_block_curvatures(
+                                        partition,
+                                        curvature_map=curvature_map,
+                                    )
 
-                    latents_dtype = latents.dtype
-                    latents = self.scheduler.step(noise_pred, t, latents, return_dict=False)[0]
+                                logger.info(
+                                    "[firered-partitioner] step=%d chosen_block_size=%s blocks=%d token_grid=(%d,%d,%d) token_stats(min=%d max=%d mean=%.2f) block_cv(mean=%.4f p90=%.4f)",
+                                    i,
+                                    partition_debug.chosen_block_size,
+                                    partition_debug.block_count,
+                                    ft,
+                                    ht,
+                                    wt,
+                                    partition_debug.block_token_min,
+                                    partition_debug.block_token_max,
+                                    partition_debug.block_token_mean,
+                                    partition_debug.mean_block_cv,
+                                    partition_debug.p90_block_cv,
+                                )
+
+                                with get_timer("anchor_step_optimizer"):
+                                    frequency_plan = self.main_frequency_optimizer.optimize(
+                                        partition=partition,
+                                        block_curvatures=block_curvatures,
+                                    )
+                                    self.current_partition = partition
+                                    self.current_frequency_plan = frequency_plan
+                                    self.current_anchor_gap = max(1, 2 * int(frequency_plan.max_interval))
+                                    self.next_anchor_step = i + self.current_anchor_gap
+                                    self.current_step_plan = self.step_scheduler.build_step_plan(
+                                        partition=partition,
+                                        block_intervals=frequency_plan.block_intervals,
+                                        phase=Phase.CRUISE_ANCHOR,
+                                        step_idx=i,
+                                        selective_step_idx=max(0, i - warmup_steps),
+                                    )
+
+                                logger.info(
+                                    "[firered-optimizer] step=%d config_tau(min=%d max=%d) assigned_tau(min=%d max=%d mean=%.3f) mean_update_rate=%.6f achieved_speedup=%.3f next_anchor_gap=%d next_anchor_step=%d histogram=%s",
+                                    i,
+                                    int(getattr(self.main_frequency_optimizer, "tau_min", 1)),
+                                    int(getattr(self.main_frequency_optimizer, "tau_max", 10)),
+                                    frequency_plan.min_interval,
+                                    frequency_plan.max_interval,
+                                    frequency_plan.mean_interval,
+                                    frequency_plan.mean_update_rate,
+                                    frequency_plan.achieved_speedup,
+                                    self.current_anchor_gap,
+                                    self.next_anchor_step,
+                                    self._format_interval_histogram(frequency_plan.block_intervals),
+                                )
+
+                                if cubic_enable_visualization and cubic_results_dir:
+                                    self.visualizer.visualize_partition_and_frequency(
+                                        partition=partition,
+                                        curvature_map=curvature_map,
+                                        block_curvatures=block_curvatures,
+                                        block_intervals=frequency_plan.block_intervals,
+                                        step_idx=i,
+                                        output_dir=cubic_results_dir,
+                                        file_suffix=f"{cubic_visual_tag}_main" if cubic_visual_tag else "main",
+                                    )
+                                    logger.info(
+                                        "[firered-visual] step=%d partition visualization exported to %s/partition_vis",
+                                        i,
+                                        cubic_results_dir,
+                                    )
+                            else:
+                                if is_cruise_anchor:
+                                    self.current_anchor_gap = 1
+                                    self.next_anchor_step = i + self.current_anchor_gap
+                                logger.info(
+                                    "[firered-monitor] step=%d first anchor collected; waiting for next anchor to form drift-based curvature.",
+                                    i,
+                                )
+
+                            latents_dtype = latents.dtype
+                            latents = self.scheduler.step(noise_pred, t, latents, return_dict=False)[0]
+                    elif phase == "phase3_cruise_selective":
+                        with get_timer("selective_forward"):
+                            with self.transformer.cache_context("cond"):
+                                noise_pred_full = self.selective_engine.forward(
+                                    transformer=self.transformer,
+                                    hidden_states=latent_model_input,
+                                    timestep=timestep / 1000,
+                                    guidance=guidance,
+                                    encoder_hidden_states_mask=prompt_embeds_mask,
+                                    encoder_hidden_states=prompt_embeds,
+                                    img_shapes=img_shapes,
+                                    attention_kwargs=self.attention_kwargs,
+                                    step_plan=self.current_step_plan,
+                                    cond_step_plan=self.current_cond_step_plan,
+                                    cache_key="cond",
+                                    main_token_count=int(latents.shape[1]),
+                                    step_idx=i,
+                                    step_phase=phase,
+                                )
+                            noise_pred = noise_pred_full[:, : latents.size(1)]
+
+                            if do_true_cfg:
+                                with self.transformer.cache_context("uncond"):
+                                    neg_noise_pred_full = self.selective_engine.forward(
+                                        transformer=self.transformer,
+                                        hidden_states=latent_model_input,
+                                        timestep=timestep / 1000,
+                                        guidance=guidance,
+                                        encoder_hidden_states_mask=negative_prompt_embeds_mask,
+                                        encoder_hidden_states=negative_prompt_embeds,
+                                        img_shapes=img_shapes,
+                                        attention_kwargs=self.attention_kwargs,
+                                        step_plan=self.current_step_plan,
+                                        cond_step_plan=self.current_cond_step_plan,
+                                        cache_key="uncond",
+                                        main_token_count=int(latents.shape[1]),
+                                        step_idx=i,
+                                        step_phase=phase,
+                                    )
+                                neg_noise_pred = neg_noise_pred_full[:, : latents.size(1)]
+                                comb_pred = neg_noise_pred + true_cfg_scale * (noise_pred - neg_noise_pred)
+
+                                cond_norm = torch.norm(noise_pred, dim=-1, keepdim=True)
+                                noise_norm = torch.norm(comb_pred, dim=-1, keepdim=True)
+                                noise_pred = comb_pred * (cond_norm / noise_norm)
+
+                        latents_dtype = latents.dtype
+                        latents = self.scheduler.step(noise_pred, t, latents, return_dict=False)[0]
+                    else:
+                        with get_timer("warmup_cooldown_step"):
+                            with self.transformer.cache_context("cond"):
+                                noise_pred_full = self.selective_engine.forward(
+                                    transformer=self.transformer,
+                                    hidden_states=latent_model_input,
+                                    timestep=timestep / 1000,
+                                    guidance=guidance,
+                                    encoder_hidden_states_mask=prompt_embeds_mask,
+                                    encoder_hidden_states=prompt_embeds,
+                                    img_shapes=img_shapes,
+                                    attention_kwargs=self.attention_kwargs,
+                                    step_plan=self.current_step_plan,
+                                    cond_step_plan=self.current_cond_step_plan,
+                                    cache_key="cond",
+                                    main_token_count=int(latents.shape[1]),
+                                    step_idx=i,
+                                    step_phase=phase,
+                                )
+                            noise_pred = noise_pred_full[:, : latents.size(1)]
+
+                            if do_true_cfg:
+                                with self.transformer.cache_context("uncond"):
+                                    neg_noise_pred_full = self.selective_engine.forward(
+                                        transformer=self.transformer,
+                                        hidden_states=latent_model_input,
+                                        timestep=timestep / 1000,
+                                        guidance=guidance,
+                                        encoder_hidden_states_mask=negative_prompt_embeds_mask,
+                                        encoder_hidden_states=negative_prompt_embeds,
+                                        img_shapes=img_shapes,
+                                        attention_kwargs=self.attention_kwargs,
+                                        step_plan=self.current_step_plan,
+                                        cond_step_plan=self.current_cond_step_plan,
+                                        cache_key="uncond",
+                                        main_token_count=int(latents.shape[1]),
+                                        step_idx=i,
+                                        step_phase=phase,
+                                    )
+                                neg_noise_pred = neg_noise_pred_full[:, : latents.size(1)]
+                                comb_pred = neg_noise_pred + true_cfg_scale * (noise_pred - neg_noise_pred)
+
+                                cond_norm = torch.norm(noise_pred, dim=-1, keepdim=True)
+                                noise_norm = torch.norm(comb_pred, dim=-1, keepdim=True)
+                                noise_pred = comb_pred * (cond_norm / noise_norm)
+
+                            latents_dtype = latents.dtype
+                            latents = self.scheduler.step(noise_pred, t, latents, return_dict=False)[0]
 
                     if latents.dtype != latents_dtype and torch.backends.mps.is_available():
                         latents = latents.to(latents_dtype)
+
+                    self._record_step_trace(
+                        step_selection=step_selection,
+                        total_steps=len(timesteps),
+                        latency_ms=self._stop_step_timer(step_start),
+                    )
 
                     if callback_on_step_end is not None:
                         callback_kwargs = {}
@@ -802,6 +924,56 @@ class CubicQwenImageEditPlusPipeline(QwenImageEditPlusPipeline):
             return (image,)
 
         return QwenImagePipelineOutput(images=image)
+
+    def get_step_trace(self) -> list[dict[str, Any]]:
+        return [dict(record) for record in self.step_trace]
+
+    @staticmethod
+    def _start_step_timer() -> float:
+        torch.cuda.synchronize()
+        return time.perf_counter()
+
+    @staticmethod
+    def _stop_step_timer(start_time: float) -> float:
+        torch.cuda.synchronize()
+        return (time.perf_counter() - start_time) * 1000.0
+
+    def _record_step_trace(
+        self,
+        step_selection: StepSelectionStats,
+        total_steps: int,
+        latency_ms: float,
+    ) -> None:
+        active_tokens = int(step_selection.total_selected)
+        total_tokens = int(step_selection.total_tokens)
+        self.step_trace.append(
+            {
+                "step": int(step_selection.step_idx),
+                "step_text": f"{int(step_selection.step_idx):02d}/{int(total_steps) - 1:02d}",
+                "phase": str(step_selection.phase),
+                "active_tokens": active_tokens,
+                "total_tokens": total_tokens,
+                "active_ratio": float(active_tokens / max(total_tokens, 1)),
+                "full_compute": not bool(step_selection.selective_enabled),
+                "main_active": int(step_selection.main_active),
+                "main_total": int(step_selection.main_total),
+                "cond_active": int(step_selection.cond_active),
+                "cond_total": int(step_selection.cond_total),
+                "anchor_gap": int(self.current_anchor_gap),
+                "next_anchor_step": None if self.next_anchor_step is None else int(self.next_anchor_step),
+                "latency_ms": round(float(latency_ms), 4),
+                "text": (
+                    f"step {int(step_selection.step_idx):02d}: "
+                    f"active {active_tokens}/{total_tokens} "
+                    f"latency {float(latency_ms):.4f} ms "
+                    f"phase={step_selection.phase} "
+                    f"main={int(step_selection.main_active)}/{int(step_selection.main_total)} "
+                    f"cond={int(step_selection.cond_active)}/{int(step_selection.cond_total)} "
+                    f"anchor_gap={int(self.current_anchor_gap)} "
+                    f"next_anchor={self.next_anchor_step}"
+                ),
+            }
+        )
 
     @staticmethod
     def _format_interval_histogram(block_intervals: dict[int, int]) -> str:

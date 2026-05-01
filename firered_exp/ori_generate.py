@@ -12,11 +12,17 @@ from firered.transformer import QwenImageTransformer2DModel
 
 from utils.launch_defaults import resolve_model_path
 from utils.results import get_prompt_id, save_params_and_metrics
-from utils.timer import get_time_statistics_dict, get_timer, init_timer, print_time_statistics
+from utils.timer import get_time_statistics_dict, init_timer, print_time_statistics, save_time_stats_to_file
 
 IMAGE_PATH = "/home/fit/zhaijdcyy/WORK/Cubic/firered_exp/examples/cola.png"
+IMAGE_PATH = "/home/chenyy/WORK/cyy/cubic/firered_exp/examples/cola.png"
+
 PROMPT = "Transform the object into a realistic miniature product by carefully holding it between your thumb and forefinger."
 TAG = "ori"
+REQUIRED_TIMER_NAMES = [
+    "generate_e2e",
+    "dit_forward",
+]
 
 init_timer()
 
@@ -74,7 +80,7 @@ def parse_args() -> argparse.Namespace:
     parser.add_argument(
         "--num_inference_steps",
         type=int,
-        default=50,
+        default=40,
         help="Number of inference steps",
     )
     parser.add_argument(
@@ -131,13 +137,11 @@ def main() -> None:
     output_image_path.parent.mkdir(parents=True, exist_ok=True)
 
     print(f"Loading pipeline from {args.model_path}...", flush=True)
-    with get_timer("load_pipeline"):
-        pipeline = load_pipeline(args.model_path)
+    pipeline = load_pipeline(args.model_path)
     print("Pipeline loaded.", flush=True)
 
     # ── Load all input images ──
-    with get_timer("load_images"):
-        images = [Image.open(p).convert("RGB") for p in args.input_image]
+    images = [Image.open(p).convert("RGB") for p in args.input_image]
     prompt = args.prompt
     print(f"Loaded {len(images)} image(s).")
 
@@ -177,26 +181,26 @@ def main() -> None:
     if args.optimized:
         print("NOTE: The first inference after compilation may take 1-2 minutes.")
 
-    with get_timer("inference_first"):
-        with torch.inference_mode():
-            result = pipeline(**inputs)
+    with torch.inference_mode():
+        result = pipeline(**inputs)
 
     output_image = result.images[0]
-    with get_timer("save_image"):
-        output_image.save(output_image_path)
+    output_image.save(output_image_path)
 
     print("Image saved at:", output_image_path.resolve())
 
     if args.optimized:
         print("Subsequent runs will be significantly faster. Enjoy~")
-        with get_timer("inference_second"):
-            with torch.inference_mode():
-                result = pipeline(**inputs)
+        with torch.inference_mode():
+            result = pipeline(**inputs)
         output_image = result.images[0]
-        with get_timer("save_image_second"):
-            output_image.save(output_image_path)
+        output_image.save(output_image_path)
 
-    print_time_statistics()
+    print_time_statistics(timer_names=REQUIRED_TIMER_NAMES)
+    save_time_stats_to_file(
+        str(output_dir / "timing_stats.txt"),
+        timer_names=REQUIRED_TIMER_NAMES,
+    )
 
     params = {
         "model": "firered",
@@ -215,7 +219,7 @@ def main() -> None:
         str(output_dir),
         TAG,
         params,
-        get_time_statistics_dict(),
+        get_time_statistics_dict(timer_names=REQUIRED_TIMER_NAMES),
         quality_metrics=None,
     )
     print(f"Params & metrics saved to {params_path}", flush=True)

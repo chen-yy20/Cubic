@@ -77,7 +77,7 @@ class ConditionComplexityMonitor:
         if comp_map is None:
             return {}
 
-        q = float(getattr(self.config, "curvature_percentile", 0.9))
+        q = float(getattr(self.config, "condition_complexity_percentile", 0.7))
         q = min(max(q, 0.0), 1.0)
 
         comp_np = comp_map.detach().float().cpu().numpy()
