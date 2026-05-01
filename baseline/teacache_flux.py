@@ -6,10 +6,13 @@ from diffusers.utils import USE_PEFT_BACKEND, is_torch_version, logging, scale_l
 import torch
 import numpy as np
 
+from utils.timer import get_timer
+
 
 logger = logging.get_logger(__name__)  # pylint: disable=invalid-name
 
 
+@get_timer("dit_forward")
 def teacache_forward(
         self,
         hidden_states: torch.Tensor,
@@ -122,6 +125,9 @@ def teacache_forward(
             self.cnt += 1 
             if self.cnt == self.num_steps:
                 self.cnt = 0           
+            if not hasattr(self, "teacache_compute_skip"):
+                self.teacache_compute_skip = []
+            self.teacache_compute_skip.append(1 if should_calc else 0)
         
         if self.enable_teacache:
             if not should_calc:
@@ -323,6 +329,7 @@ def reset_teacache_state(transformer: FluxTransformer2DModel) -> None:
     transformer.accumulated_rel_l1_distance = 0
     transformer.previous_modulated_input = None
     transformer.previous_residual = None
+    transformer.teacache_compute_skip = []
 
 
 apply_teacache_monkey_patch()

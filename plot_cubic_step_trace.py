@@ -38,16 +38,25 @@ def load_payload(json_path: Path) -> dict:
         return json.load(f)
 
 
-def load_step_trace(payload: dict, json_path: Path) -> list[dict]:
+def load_step_traces(payload: dict, json_path: Path) -> dict[str, list[dict]]:
     quality_metrics = payload.get('quality_metrics') or {}
     cubic_step_trace = quality_metrics.get('cubic_step_trace') or {}
+    per_seed = cubic_step_trace.get('per_seed') or {}
+    traces = {}
+    for seed_key, seed_payload in per_seed.items():
+        seed_steps = seed_payload.get('steps') if isinstance(seed_payload, dict) else seed_payload
+        if seed_steps:
+            traces[str(seed_key)] = seed_steps
+    if traces:
+        return traces
+
     steps = cubic_step_trace.get('steps') or []
     if not steps:
         raise ValueError(
             f'No step trace found in {json_path}. '
             'Expected quality_metrics.cubic_step_trace.steps.'
         )
-    return steps
+    return {'trace': steps}
 
 
 def default_output_path(json_path: Path) -> Path:
@@ -57,13 +66,12 @@ def default_output_path(json_path: Path) -> Path:
     return json_path.parent / f'{stem}_step_trace.png'
 
 
-def plot_step_trace(step_trace: list[dict], output_path: Path, title: str) -> None:
+def _plot_single_trace(ax_active, step_trace: list[dict], title: str) -> None:
     timesteps = [int(item['step']) for item in step_trace]
     active_tokens = [int(item['active_tokens']) for item in step_trace]
     latencies = [float(item['latency_ms']) for item in step_trace]
     total_tokens = max(int(item.get('total_tokens', 0)) for item in step_trace)
 
-    fig, ax_active = plt.subplots(figsize=(14, 7), dpi=150)
     ax_latency = ax_active.twinx()
 
     bar_color = '#c97b2a'
@@ -117,6 +125,17 @@ def plot_step_trace(step_trace: list[dict], output_path: Path, title: str) -> No
         loc='upper right',
     )
 
+
+def plot_step_traces(step_traces: dict[str, list[dict]], output_path: Path, title: str) -> None:
+    trace_items = list(step_traces.items())
+    row_count = len(trace_items)
+    fig_height = max(5, 3.7 * row_count)
+    fig, axes = plt.subplots(row_count, 1, figsize=(14, fig_height), dpi=150, squeeze=False)
+
+    for row_idx, (trace_name, step_trace) in enumerate(trace_items):
+        subplot_title = title if row_count == 1 else f'{title} | {trace_name}'
+        _plot_single_trace(axes[row_idx][0], step_trace, subplot_title)
+
     fig.tight_layout()
     fig.savefig(output_path, bbox_inches='tight')
     plt.close(fig)
@@ -129,7 +148,7 @@ def main() -> None:
         raise FileNotFoundError(f'JSON not found: {json_path}')
 
     payload = load_payload(json_path)
-    step_trace = load_step_trace(payload, json_path)
+    step_traces = load_step_traces(payload, json_path)
     output_path = (
         args.output.expanduser().resolve()
         if args.output is not None
@@ -141,7 +160,7 @@ def main() -> None:
     if prompt:
         title = f'Cubic Step Trace\n{prompt}'
 
-    plot_step_trace(step_trace, output_path, title)
+    plot_step_traces(step_traces, output_path, title)
     print(f'Saved plot to {output_path}')
 
 

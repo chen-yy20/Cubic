@@ -217,13 +217,7 @@ class FluxSelectiveForwardEngine:
         step_plan=None,
         cache_key: str = "default",
     ) -> torch.Tensor:
-        use_selective = (
-            step_plan is not None
-            and (not step_plan.is_full_compute)
-            and step_plan.active_token_indices.numel() > 0
-        )
-
-        if not use_selective:
+        if step_plan is None or step_plan.is_full_compute:
             return self._full_forward_and_refresh_cache(
                 transformer=transformer,
                 hidden_states=hidden_states,
@@ -239,7 +233,31 @@ class FluxSelectiveForwardEngine:
 
         batch_size, seq_len, _ = hidden_states.shape
         active_idx = step_plan.active_token_indices.long().to(hidden_states.device)
-        if active_idx.numel() == 0 or int(active_idx.numel()) >= int(seq_len):
+        out_cache = self.output_cache.get(cache_key)
+
+        if active_idx.numel() == 0:
+            if out_cache is not None and out_cache.shape == hidden_states.shape:
+                logging.debug(
+                    "[flux-selective] active_tokens=0 frozen_tokens=%d cache=reuse_full_sequence",
+                    int(seq_len),
+                )
+                return out_cache.to(device=hidden_states.device, dtype=hidden_states.dtype).clone()
+
+            logging.info("[flux-selective] active_tokens=0 but missing/invalid output cache, fallback full.")
+            return self._full_forward_and_refresh_cache(
+                transformer=transformer,
+                hidden_states=hidden_states,
+                timestep=timestep,
+                guidance=guidance,
+                pooled_projections=pooled_projections,
+                encoder_hidden_states=encoder_hidden_states,
+                txt_ids=txt_ids,
+                img_ids=img_ids,
+                joint_attention_kwargs=joint_attention_kwargs,
+                cache_key=cache_key,
+            )
+
+        if int(active_idx.numel()) >= int(seq_len):
             return self._full_forward_and_refresh_cache(
                 transformer=transformer,
                 hidden_states=hidden_states,
@@ -272,7 +290,6 @@ class FluxSelectiveForwardEngine:
                 cache_key=cache_key,
             )
 
-        out_cache = self.output_cache.get(cache_key)
         if out_cache is None or out_cache.shape != hidden_states.shape:
             logging.info("[flux-selective] missing/invalid output cache, fallback full.")
             return self._full_forward_and_refresh_cache(

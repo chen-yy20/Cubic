@@ -9,7 +9,7 @@ from flux_cubic.pipeline import CubicFluxPipeline
 from utils.launch_defaults import resolve_model_path
 from utils.quality_metric import evaluate_quality_with_origin
 from utils.results import get_prompt_id, save_params_and_metrics
-from utils.timer import get_time_statistics_dict, init_timer, print_time_statistics
+from utils.timer import get_time_statistics_dict, init_timer, print_time_statistics, save_time_stats_to_file
 
 HEIGHT = 1024
 WIDTH = 1024
@@ -19,15 +19,55 @@ GUIDANCE_SCALE = 3.5
 NUM_IMAGES = 3
 SEEDS = [42 + i for i in range(NUM_IMAGES)]
 
-SPEEDUP = 4
-WARMUP_FRACTION = 0.1
-COOLDOWN_FRACTION = 0.1
-ANCHOR_INTERVAL = 10
+SPEEDUP = 5
+WARMUP_STEPS = 9
+COOLDOWN_STEPS = 1
 
-TAG = "cubic"
 
-curvature_visualize = True # Set to True to enable curvature visualization, which will store curvature maps and token selection maps for each step in the specified results directory. This is useful for analyzing the behavior of the cubic scheduling, but will consume more storage and slightly more time due to the additional I/O operations.
+curvature_visualize = False # Set to True to enable curvature visualization, which will store curvature maps and token selection maps for each step in the specified results directory. This is useful for analyzing the behavior of the cubic scheduling, but will consume more storage and slightly more time due to the additional I/O operations.
 quality_eval = True
+
+TAG = f"cubic_w{WARMUP_STEPS}_s{SPEEDUP}"
+REQUIRED_TIMER_NAMES = [
+    "generate_e2e",
+    "anchor_step_monitor",
+    "anchor_step_partitioner",
+    "anchor_step_optimizer",
+    "anchor_step_total",
+    "warmup_cooldown_step",
+    "selective_forward",
+]
+
+def _build_step_latency_metrics(step_trace, per_seed_trace=None):
+    trace = [dict(item) for item in step_trace]
+    payload = {
+        "steps": trace,
+        "text_lines": [item["text"] for item in trace],
+    }
+    if per_seed_trace is not None:
+        payload["per_seed"] = {
+            seed_key: {
+                "steps": [dict(item) for item in seed_trace],
+                "text_lines": [item["text"] for item in seed_trace],
+            }
+            for seed_key, seed_trace in per_seed_trace.items()
+        }
+    return {"cubic_step_trace": payload}
+
+
+def _merge_quality_and_step_metrics(quality_metrics, step_trace, per_seed_trace=None):
+    merged = dict(quality_metrics) if isinstance(quality_metrics, dict) else {}
+    merged.update(_build_step_latency_metrics(step_trace, per_seed_trace=per_seed_trace))
+    return merged
+
+
+def _print_step_latency_trace(step_trace, seed=None):
+    prefix = "Cubic per-step latency / active tokens"
+    if seed is not None:
+        prefix += f" (seed={seed})"
+    print(f"{prefix}:", flush=True)
+    for item in step_trace:
+        print(item["text"], flush=True)
 
 
 def parse_args() -> argparse.Namespace:
@@ -58,6 +98,7 @@ def main() -> None:
     print(f"Model loaded, GPU memory allocated: {torch.cuda.memory_allocated()/1024**2:.2f}MB", flush=True)
 
     per_seed_quality: dict[str, dict] = {}
+    per_seed_step_trace: dict[str, list[dict]] = {}
 
     for seed in SEEDS:
         generator = torch.Generator("cuda").manual_seed(seed)
@@ -70,14 +111,16 @@ def main() -> None:
                 num_inference_steps=NUM_INFERENCE_STEPS,
                 max_sequence_length=512,
                 generator=generator,
-                cubic_warmup_fraction=WARMUP_FRACTION,
-                cubic_cooldown_fraction=COOLDOWN_FRACTION,
-                cubic_anchor_interval=ANCHOR_INTERVAL,
+                cubic_warmup_steps=WARMUP_STEPS,
+                cubic_cooldown_steps=COOLDOWN_STEPS,
                 cubic_target_speedup=SPEEDUP,
                 cubic_enable_visualization=curvature_visualize,
                 cubic_results_dir=output_dir,
                 cubic_visual_tag=f"seed{seed}",
             ).images[0]
+        step_trace = pipe.get_step_trace()
+        per_seed_step_trace[f"seed{seed}"] = step_trace
+        _print_step_latency_trace(step_trace, seed=seed)
         output_path = os.path.join(output_dir, f"{TAG}_{get_prompt_id(PROMPT)}_seed{seed}.png")
         image.save(output_path)
         print(f"Stored {output_path}!", flush=True)
@@ -111,7 +154,12 @@ def main() -> None:
                 "mean": None,
             }
 
-    print_time_statistics()
+    print_time_statistics(timer_names=REQUIRED_TIMER_NAMES)
+    save_time_stats_to_file(
+        os.path.join(output_dir, "timing_stats.txt"),
+        timer_names=REQUIRED_TIMER_NAMES,
+    )
+    first_step_trace = next(iter(per_seed_step_trace.values()), [])
     params = {
         "model": "flux",
         "method": TAG,
@@ -125,17 +173,23 @@ def main() -> None:
         "guidance_scale": GUIDANCE_SCALE,
         "seeds": SEEDS,
         "target_speedup": SPEEDUP,
-        "warmup_fraction": WARMUP_FRACTION,
-        "cooldown_fraction": COOLDOWN_FRACTION,
-        "anchor_interval": ANCHOR_INTERVAL,
+        "warmup_steps": WARMUP_STEPS,
+        "cooldown_steps": COOLDOWN_STEPS,
+        "dynamic_anchor": "2x_tau_max",
+        "partition_mode": "uniform",
+        "uniform_common_factor_blocks": True,
         "quality_eval": quality_eval,
     }
     params_path = save_params_and_metrics(
         output_dir,
         TAG,
         params,
-        get_time_statistics_dict(),
-        quality_metrics=quality_metrics,
+        get_time_statistics_dict(timer_names=REQUIRED_TIMER_NAMES),
+        quality_metrics=_merge_quality_and_step_metrics(
+            quality_metrics,
+            first_step_trace,
+            per_seed_trace=per_seed_step_trace,
+        ),
     )
     print(f"Params & metrics saved to {params_path}", flush=True)
 

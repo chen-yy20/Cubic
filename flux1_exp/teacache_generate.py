@@ -29,9 +29,9 @@ from utils.quality_metric import evaluate_quality_with_origin
 from utils.results import get_prompt_id, save_params_and_metrics
 from utils.timer import (
     get_time_statistics_dict,
-    get_timer,
     init_timer,
     print_time_statistics,
+    save_time_stats_to_file,
 )
 
 # ── 默认配置（与 ori/cubic 保持一致，便于质量对比）────────────────────────────
@@ -42,10 +42,36 @@ NUM_INFERENCE_STEPS = 50
 GUIDANCE_SCALE     = 3.5
 NUM_IMAGES         = 3
 SEEDS              = [42 + i for i in range(NUM_IMAGES)]
-REL_L1_THRESH      = 0.0   # 官方默认；越大越快质量损失越多（0.25/0.4/0.6/0.8 对应 ~12/10/9/8s）
+REL_L1_THRESH      = 0.25   # 官方默认；越大越快质量损失越多（0.25/0.4/0.6/0.8 对应 ~12/10/9/8s）
 
-TAG      = "teacache"
+TAG      = f"teacache_{REL_L1_THRESH}"
 quality_eval = True
+REQUIRED_TIMER_NAMES = ["generate_e2e", "dit_forward"]
+
+
+def _format_teacache_sequence(sequence: list[int]) -> str:
+    return "".join(str(int(value)) for value in sequence)
+
+
+def _build_teacache_sequence_metrics(per_seed_sequence: dict[str, list[int]]) -> dict:
+    per_seed = {}
+    for seed_key, sequence in per_seed_sequence.items():
+        seq = [int(value) for value in sequence]
+        compute_steps = sum(seq)
+        per_seed[seed_key] = {
+            "sequence": seq,
+            "text": _format_teacache_sequence(seq),
+            "compute_steps": int(compute_steps),
+            "reuse_steps": int(len(seq) - compute_steps),
+            "total_steps": int(len(seq)),
+        }
+    return {"teacache_compute_skip": {"per_seed": per_seed}}
+
+
+def _merge_quality_and_teacache_metrics(quality_metrics, per_seed_sequence: dict[str, list[int]]):
+    merged = dict(quality_metrics) if isinstance(quality_metrics, dict) else {}
+    merged.update(_build_teacache_sequence_metrics(per_seed_sequence))
+    return merged
 
 
 # ── 参数解析 ─────────────────────────────────────────────────────────────────
@@ -96,8 +122,7 @@ def main() -> None:
     os.makedirs(output_dir, exist_ok=True)
 
     print(f"[teacache-flux] Loading pipeline from {args.model_path}...", flush=True)
-    with get_timer("load_pipeline"):
-        pipe = load_pipeline(args.model_path)
+    pipe = load_pipeline(args.model_path)
     print(
         f"[teacache-flux] Pipeline loaded. "
         f"GPU memory: {torch.cuda.memory_allocated() / 1024**2:.0f} MB",
@@ -117,37 +142,45 @@ def main() -> None:
     )
 
     per_seed_quality: dict[str, dict] = {}
+    per_seed_teacache_sequence: dict[str, list[int]] = {}
 
     for seed in seeds:
         # TeaCache 状态必须在每次生成前重置
         reset_teacache_state(transformer)
 
         generator = torch.Generator("cuda").manual_seed(seed)
-        with get_timer("inference"):
-            with torch.inference_mode():
-                image = pipe(
-                    args.prompt,
-                    height=args.height,
-                    width=args.width,
-                    guidance_scale=args.guidance_scale,
-                    num_inference_steps=args.num_inference_steps,
-                    max_sequence_length=512,
-                    generator=generator,
-                ).images[0]
+        with torch.inference_mode():
+            image = pipe(
+                args.prompt,
+                height=args.height,
+                width=args.width,
+                guidance_scale=args.guidance_scale,
+                num_inference_steps=args.num_inference_steps,
+                max_sequence_length=512,
+                generator=generator,
+            ).images[0]
+        sequence = [int(value) for value in getattr(transformer, "teacache_compute_skip", [])]
+        per_seed_teacache_sequence[f"seed{seed}"] = sequence
+        compute_steps = sum(sequence)
+        print(
+            f"[teacache-flux] seed={seed} compute/reuse sequence "
+            f"(1=compute,0=reuse): {_format_teacache_sequence(sequence)} "
+            f"compute={compute_steps} reuse={len(sequence) - compute_steps}",
+            flush=True,
+        )
 
         output_path = os.path.join(output_dir, f"{TAG}_{prompt_id}_seed{seed}.png")
         image.save(output_path)
         print(f"[teacache-flux] Saved {output_path}", flush=True)
 
         if not args.disable_quality_eval:
-            with get_timer("quality_eval"):
-                quality_result = evaluate_quality_with_origin(
-                    image_path=output_path,
-                    tag=TAG,
-                    save_metrics=False,
-                    baseline_path=None,
-                    output_dir=output_dir,
-                )
+            quality_result = evaluate_quality_with_origin(
+                image_path=output_path,
+                tag=TAG,
+                save_metrics=False,
+                baseline_path=None,
+                output_dir=output_dir,
+            )
             per_seed_quality[f"seed{seed}"] = (
                 quality_result["metrics"] if quality_result is not None else {}
             )
@@ -165,7 +198,11 @@ def main() -> None:
         else:
             quality_metrics = {"per_seed": per_seed_quality, "mean": None}
 
-    print_time_statistics()
+    print_time_statistics(timer_names=REQUIRED_TIMER_NAMES)
+    save_time_stats_to_file(
+        os.path.join(output_dir, "timing_stats.txt"),
+        timer_names=REQUIRED_TIMER_NAMES,
+    )
 
     params = {
         "model":               "flux",
@@ -186,8 +223,8 @@ def main() -> None:
         output_dir,
         TAG,
         params,
-        get_time_statistics_dict(),
-        quality_metrics=quality_metrics,
+        get_time_statistics_dict(timer_names=REQUIRED_TIMER_NAMES),
+        quality_metrics=_merge_quality_and_teacache_metrics(quality_metrics, per_seed_teacache_sequence),
     )
     print(f"[teacache-flux] Params & metrics saved to {params_path}", flush=True)
 

@@ -23,6 +23,7 @@ from .types import Block, Partition
 
 _DEFAULT_PRESET: Dict[str, int | float | str] = {
     'partition_mode': 'morphology',
+    'uniform_common_factor_blocks': False,
     'min_block_size': 2,
     'max_block_size': 16,
     'cv_threshold': 0.5,
@@ -82,6 +83,9 @@ class AdaptivePartitioner:
 
     def __init__(self, config):
         self.partition_mode = str(getattr(config, 'partition_mode', _DEFAULT_PRESET['partition_mode'])).lower()
+        self.uniform_common_factor_blocks = bool(
+            getattr(config, 'uniform_common_factor_blocks', _DEFAULT_PRESET['uniform_common_factor_blocks'])
+        )
         self.min_block_size = int(getattr(config, 'min_block_size', _DEFAULT_PRESET['min_block_size']))
         self.max_block_size = int(getattr(config, 'max_block_size', _DEFAULT_PRESET['max_block_size']))
         self.cv_threshold = float(getattr(config, 'cv_threshold', _DEFAULT_PRESET['cv_threshold']))
@@ -197,6 +201,8 @@ class AdaptivePartitioner:
     ) -> Partition:
         if curvature_map is None:
             chosen = self._default_block_size(ft, ht, wt)
+        elif self.uniform_common_factor_blocks:
+            chosen = self._common_factor_block_size(ft, ht, wt)
         else:
             chosen = self._select_block_size(curvature_map.detach().float())
 
@@ -616,6 +622,25 @@ class AdaptivePartitioner:
         f = max(1, min(ft, self.max_block_size))
         h = max(1, min(ht, self.max_block_size))
         w = max(1, min(wt, self.max_block_size))
+        return f, h, w
+
+    def _common_factor_block_size(self, ft: int, ht: int, wt: int) -> Tuple[int, int, int]:
+        """Choose the largest cheap uniform block that exactly tiles each axis."""
+        def largest_factor(dim: int) -> int:
+            dim = max(1, int(dim))
+            upper = max(1, min(dim, int(self.max_block_size)))
+            lower = max(1, min(upper, int(self.min_block_size)))
+            for value in range(upper, 0, -1):
+                if dim % value == 0 and value >= lower:
+                    return value
+            for value in range(upper, 0, -1):
+                if dim % value == 0:
+                    return value
+            return 1
+
+        f = max(1, min(ft, self.max_block_size))
+        h = largest_factor(ht)
+        w = largest_factor(wt)
         return f, h, w
 
     def _tile_uniform(self, ft: int, ht: int, wt: int, block_size: Tuple[int, int, int]) -> List[Block]:

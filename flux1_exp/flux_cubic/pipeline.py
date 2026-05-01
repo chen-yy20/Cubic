@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import time
 from typing import Any, Callable, Dict, List, Optional, Union
 
 import numpy as np
@@ -47,9 +48,8 @@ class CubicFluxPipeline(FluxPipeline):
             tokenizer_2=tokenizer_2,
             transformer=transformer,
         )
-        self.phase_warmup_fraction = 0.15
-        self.phase_cooldown_fraction = 0.15
-        self.phase_anchor_interval = 8
+        self.phase_warmup_steps = 5
+        self.phase_cooldown_steps = 5
 
         self.target_speedup = 2.0
         self.alpha = 2.0
@@ -66,6 +66,8 @@ class CubicFluxPipeline(FluxPipeline):
         self.max_block_tokens = 256
         self.cv_threshold = 0.5
         self.max_blocksize_candidates = 36
+        self.partition_mode = "uniform"
+        self.uniform_common_factor_blocks = True
 
         self.monitor = CurvatureMonitor(self)
         self.visualizer = CubicVisualizer(self)
@@ -76,13 +78,15 @@ class CubicFluxPipeline(FluxPipeline):
         self.current_partition = None
         self.current_frequency_plan = None
         self.current_step_plan = None
+        self.next_anchor_step = None
+        self.current_anchor_gap = 0
+        self.step_trace: list[dict[str, Any]] = []
 
     def _get_inference_phase(self, step: int, total_steps: int) -> str:
         if total_steps <= 0:
             return "phase4_cooldown"
 
-        warmup_steps = max(0, int(total_steps * self.phase_warmup_fraction))
-        cooldown_steps = max(0, int(total_steps * self.phase_cooldown_fraction))
+        warmup_steps, cooldown_steps = self._resolve_phase_steps(total_steps)
         cooldown_start = max(0, total_steps - cooldown_steps)
 
         if step < warmup_steps:
@@ -90,10 +94,20 @@ class CubicFluxPipeline(FluxPipeline):
         if step >= cooldown_start:
             return "phase4_cooldown"
 
-        anchor_interval = max(1, int(self.phase_anchor_interval))
-        if (step - warmup_steps) % anchor_interval == 0:
+        if self.next_anchor_step is None:
+            self.next_anchor_step = warmup_steps
+
+        if step == self.next_anchor_step:
             return "phase2_cruise_anchor"
         return "phase3_cruise_selective"
+
+    def _resolve_phase_steps(self, total_steps: int) -> tuple[int, int]:
+        total_steps = max(0, int(total_steps))
+        warmup_steps = max(0, int(self.phase_warmup_steps))
+        cooldown_steps = max(0, int(self.phase_cooldown_steps))
+        if warmup_steps + cooldown_steps > total_steps:
+            cooldown_steps = max(0, total_steps - warmup_steps)
+        return warmup_steps, cooldown_steps
 
     def _normalize_t_to_unit_interval(self, t: torch.Tensor | float) -> float:
         if isinstance(t, torch.Tensor):
@@ -129,6 +143,8 @@ class CubicFluxPipeline(FluxPipeline):
         callback_on_step_end: Optional[Callable[[int, int, Dict], None]] = None,
         callback_on_step_end_tensor_inputs: List[str] = ["latents"],
         max_sequence_length: int = 512,
+        cubic_warmup_steps: Optional[int] = None,
+        cubic_cooldown_steps: Optional[int] = None,
         cubic_warmup_fraction: Optional[float] = None,
         cubic_cooldown_fraction: Optional[float] = None,
         cubic_anchor_interval: Optional[int] = None,
@@ -137,12 +153,15 @@ class CubicFluxPipeline(FluxPipeline):
         cubic_results_dir: Optional[str] = None,
         cubic_visual_tag: Optional[str] = None,
     ):
-        if cubic_warmup_fraction is not None:
-            self.phase_warmup_fraction = float(cubic_warmup_fraction)
-        if cubic_cooldown_fraction is not None:
-            self.phase_cooldown_fraction = float(cubic_cooldown_fraction)
-        if cubic_anchor_interval is not None:
-            self.phase_anchor_interval = int(cubic_anchor_interval)
+        if cubic_warmup_steps is not None:
+            self.phase_warmup_steps = int(cubic_warmup_steps)
+        elif cubic_warmup_fraction is not None:
+            self.phase_warmup_steps = int(num_inference_steps * float(cubic_warmup_fraction))
+        if cubic_cooldown_steps is not None:
+            self.phase_cooldown_steps = int(cubic_cooldown_steps)
+        elif cubic_cooldown_fraction is not None:
+            self.phase_cooldown_steps = int(num_inference_steps * float(cubic_cooldown_fraction))
+        _ = cubic_anchor_interval
         if cubic_target_speedup is not None:
             self.target_speedup = float(cubic_target_speedup)
 
@@ -153,6 +172,9 @@ class CubicFluxPipeline(FluxPipeline):
         self.current_partition = None
         self.current_frequency_plan = None
         self.current_step_plan = None
+        self.next_anchor_step = None
+        self.current_anchor_gap = 0
+        self.step_trace = []
 
         height = height or self.default_sample_size * self.vae_scale_factor
         width = width or self.default_sample_size * self.vae_scale_factor
@@ -236,7 +258,7 @@ class CubicFluxPipeline(FluxPipeline):
         else:
             guidance = None
 
-        warmup_steps = max(0, int(len(timesteps) * self.phase_warmup_fraction))
+        warmup_steps, cooldown_steps = self._resolve_phase_steps(len(timesteps))
 
         with get_timer("generate_e2e"):
             pbar = tqdm(
@@ -254,6 +276,7 @@ class CubicFluxPipeline(FluxPipeline):
                 phase_enum = self._phase_to_enum(phase)
 
                 timestep = t.expand(latents.shape[0]).to(latents.dtype)
+                step_start = self._start_step_timer()
 
                 if self.current_partition is not None and self.current_frequency_plan is not None:
                     selective_step_idx = max(0, i - warmup_steps)
@@ -265,80 +288,129 @@ class CubicFluxPipeline(FluxPipeline):
                         selective_step_idx=selective_step_idx,
                     )
 
-                step_plan = self.current_step_plan if phase == "phase3_cruise_selective" else None
-                with get_timer("selective_forward" if step_plan is not None else "full_forward"):
-                    noise_pred = self.selective_forward.forward(
-                        transformer=self.transformer,
-                        hidden_states=latents,
-                        timestep=timestep,
-                        guidance=guidance,
-                        pooled_projections=pooled_prompt_embeds,
-                        encoder_hidden_states=prompt_embeds,
-                        txt_ids=text_ids,
-                        img_ids=latent_image_ids,
-                        joint_attention_kwargs=self.joint_attention_kwargs,
-                        step_plan=step_plan,
-                        cache_key="flux",
-                    )
-
                 is_last_warmup = warmup_steps > 0 and phase == "phase1_warmup" and i == warmup_steps - 1
                 is_cruise_anchor = phase == "phase2_cruise_anchor"
                 if is_last_warmup or is_cruise_anchor:
-                    with get_timer("anchor_step_monitor"):
-                        latents_unpacked = self._unpack_latents(latents, height, width, self.vae_scale_factor)
-                        noise_unpacked = self._unpack_latents(noise_pred, height, width, self.vae_scale_factor)
-                        curvature_map = self.monitor.update(
-                            x=latents_unpacked.unsqueeze(2),
-                            v=noise_unpacked.unsqueeze(2),
-                            t=self._normalize_t_to_unit_interval(t),
-                            step_idx=i,
+                    with get_timer("anchor_step_total"):
+                        noise_pred = self.selective_forward.forward(
+                            transformer=self.transformer,
+                            hidden_states=latents,
+                            timestep=timestep,
+                            guidance=guidance,
+                            pooled_projections=pooled_prompt_embeds,
+                            encoder_hidden_states=prompt_embeds,
+                            txt_ids=text_ids,
+                            img_ids=latent_image_ids,
+                            joint_attention_kwargs=self.joint_attention_kwargs,
+                            step_plan=None,
+                            cache_key="flux",
                         )
 
-                    if curvature_map is not None:
-                        with get_timer("anchor_step_partitioner"):
-                            ft, ht, wt = curvature_map.shape
-                            partition = self.partitioner.partition(
-                                Ft=ft,
-                                Ht=ht,
-                                Wt=wt,
-                                curvature_map=curvature_map,
-                            )
-                            block_curvatures = self.monitor.get_block_curvatures(
-                                partition,
-                                curvature_map=curvature_map,
-                            )
-
-                        with get_timer("anchor_step_optimizer"):
-                            frequency_plan = self.frequency_optimizer.optimize(
-                                partition=partition,
-                                block_curvatures=block_curvatures,
-                            )
-                            self.current_partition = partition
-                            self.current_frequency_plan = frequency_plan
-                            self.current_step_plan = self.step_scheduler.build_step_plan(
-                                partition=partition,
-                                block_intervals=frequency_plan.block_intervals,
-                                phase=Phase.CRUISE_ANCHOR,
+                        with get_timer("anchor_step_monitor"):
+                            latents_unpacked = self._unpack_latents(latents, height, width, self.vae_scale_factor)
+                            noise_unpacked = self._unpack_latents(noise_pred, height, width, self.vae_scale_factor)
+                            curvature_map = self.monitor.update(
+                                x=latents_unpacked.unsqueeze(2),
+                                v=noise_unpacked.unsqueeze(2),
+                                t=self._normalize_t_to_unit_interval(t),
                                 step_idx=i,
-                                selective_step_idx=max(0, i - warmup_steps),
                             )
 
-                        if cubic_enable_visualization and cubic_results_dir:
-                            self.visualizer.visualize_partition_and_frequency(
-                                partition=partition,
-                                curvature_map=curvature_map,
-                                block_curvatures=block_curvatures,
-                                block_intervals=frequency_plan.block_intervals,
-                                step_idx=i,
-                                output_dir=cubic_results_dir,
-                                file_suffix=cubic_visual_tag,
-                            )
+                        if curvature_map is not None:
+                            with get_timer("anchor_step_partitioner"):
+                                ft, ht, wt = curvature_map.shape
+                                partition = self.partitioner.partition(
+                                    Ft=ft,
+                                    Ht=ht,
+                                    Wt=wt,
+                                    curvature_map=curvature_map,
+                                )
+                                block_curvatures = self.monitor.get_block_curvatures(
+                                    partition,
+                                    curvature_map=curvature_map,
+                                )
 
-                latents_dtype = latents.dtype
-                latents = self.scheduler.step(noise_pred, t, latents, return_dict=False)[0]
+                            with get_timer("anchor_step_optimizer"):
+                                frequency_plan = self.frequency_optimizer.optimize(
+                                    partition=partition,
+                                    block_curvatures=block_curvatures,
+                                )
+                                self.current_partition = partition
+                                self.current_frequency_plan = frequency_plan
+                                self.current_step_plan = self.step_scheduler.build_step_plan(
+                                    partition=partition,
+                                    block_intervals=frequency_plan.block_intervals,
+                                    phase=Phase.CRUISE_ANCHOR,
+                                    step_idx=i,
+                                    selective_step_idx=max(0, i - warmup_steps),
+                                )
+                                self.current_anchor_gap = max(1, 2 * int(frequency_plan.max_interval))
+                                self.next_anchor_step = i + self.current_anchor_gap
+
+                            if cubic_enable_visualization and cubic_results_dir:
+                                self.visualizer.visualize_partition_and_frequency(
+                                    partition=partition,
+                                    curvature_map=curvature_map,
+                                    block_curvatures=block_curvatures,
+                                    block_intervals=frequency_plan.block_intervals,
+                                    step_idx=i,
+                                    output_dir=cubic_results_dir,
+                                    file_suffix=cubic_visual_tag,
+                                )
+                        else:
+                            self.current_anchor_gap = 1
+                            self.next_anchor_step = i + self.current_anchor_gap
+
+                        latents_dtype = latents.dtype
+                        latents = self.scheduler.step(noise_pred, t, latents, return_dict=False)[0]
+                elif phase == "phase3_cruise_selective":
+                    with get_timer("selective_forward"):
+                        noise_pred = self.selective_forward.forward(
+                            transformer=self.transformer,
+                            hidden_states=latents,
+                            timestep=timestep,
+                            guidance=guidance,
+                            pooled_projections=pooled_prompt_embeds,
+                            encoder_hidden_states=prompt_embeds,
+                            txt_ids=text_ids,
+                            img_ids=latent_image_ids,
+                            joint_attention_kwargs=self.joint_attention_kwargs,
+                            step_plan=self.current_step_plan,
+                            cache_key="flux",
+                        )
+
+                    latents_dtype = latents.dtype
+                    latents = self.scheduler.step(noise_pred, t, latents, return_dict=False)[0]
+                else:
+                    with get_timer("warmup_cooldown_step"):
+                        noise_pred = self.selective_forward.forward(
+                            transformer=self.transformer,
+                            hidden_states=latents,
+                            timestep=timestep,
+                            guidance=guidance,
+                            pooled_projections=pooled_prompt_embeds,
+                            encoder_hidden_states=prompt_embeds,
+                            txt_ids=text_ids,
+                            img_ids=latent_image_ids,
+                            joint_attention_kwargs=self.joint_attention_kwargs,
+                            step_plan=None,
+                            cache_key="flux",
+                        )
+
+                        latents_dtype = latents.dtype
+                        latents = self.scheduler.step(noise_pred, t, latents, return_dict=False)[0]
 
                 if latents.dtype != latents_dtype and torch.backends.mps.is_available():
                     latents = latents.to(latents_dtype)
+
+                latency_ms = self._stop_step_timer(step_start)
+                self._record_step_trace(
+                    step=i,
+                    phase=phase,
+                    total_steps=len(timesteps),
+                    latency_ms=latency_ms,
+                    fallback_total_tokens=int(image_seq_len),
+                )
 
                 if callback_on_step_end is not None:
                     callback_kwargs = {}
@@ -377,6 +449,71 @@ class CubicFluxPipeline(FluxPipeline):
 
         return FluxPipelineOutput(images=image)
 
+    def get_step_trace(self) -> list[dict[str, Any]]:
+        return [dict(record) for record in self.step_trace]
+
+    @staticmethod
+    def _start_step_timer() -> float:
+        torch.cuda.synchronize()
+        return time.perf_counter()
+
+    @staticmethod
+    def _stop_step_timer(start_time: float) -> float:
+        torch.cuda.synchronize()
+        return (time.perf_counter() - start_time) * 1000.0
+
+    def _record_step_trace(
+        self,
+        step: int,
+        phase: str,
+        total_steps: int,
+        latency_ms: float,
+        fallback_total_tokens: int,
+    ) -> None:
+        active_tokens, total_tokens, full_compute = self._get_step_activity_counts(fallback_total_tokens)
+        self.step_trace.append(
+            {
+                "step": int(step),
+                "step_text": f"{int(step):02d}/{int(total_steps) - 1:02d}",
+                "phase": str(phase),
+                "active_tokens": int(active_tokens),
+                "total_tokens": int(total_tokens),
+                "active_ratio": float(active_tokens / max(total_tokens, 1)),
+                "full_compute": bool(full_compute),
+                "anchor_gap": int(self.current_anchor_gap),
+                "next_anchor_step": None if self.next_anchor_step is None else int(self.next_anchor_step),
+                "latency_ms": round(float(latency_ms), 4),
+                "text": (
+                    f"step {int(step):02d}: "
+                    f"active {int(active_tokens)}/{int(total_tokens)} "
+                    f"latency {float(latency_ms):.4f} ms "
+                    f"phase={phase} "
+                    f"anchor_gap={int(self.current_anchor_gap)} "
+                    f"next_anchor={self.next_anchor_step}"
+                ),
+            }
+        )
+
+    def _get_step_activity_counts(self, fallback_total_tokens: int) -> tuple[int, int, bool]:
+        if self.current_step_plan is not None:
+            active_tokens = int(self.current_step_plan.active_token_indices.numel())
+            if self.current_step_plan.is_full_compute:
+                total_tokens = (
+                    int(self.current_partition.total_tokens)
+                    if self.current_partition is not None
+                    else int(max(fallback_total_tokens, active_tokens))
+                )
+                return total_tokens, total_tokens, True
+
+            frozen_tokens = int(self.current_step_plan.frozen_token_indices.numel())
+            total_tokens = active_tokens + frozen_tokens
+            if total_tokens <= 0:
+                total_tokens = int(fallback_total_tokens)
+            return active_tokens, total_tokens, False
+
+        total_tokens = int(fallback_total_tokens)
+        return total_tokens, total_tokens, True
+
     @staticmethod
     def _phase_to_enum(phase_name: str) -> Phase:
         if phase_name == "phase1_warmup":
@@ -395,6 +532,8 @@ class CubicFluxPipeline(FluxPipeline):
         self.partitioner.max_block_tokens = int(self.max_block_tokens)
         self.partitioner.cv_threshold = float(self.cv_threshold)
         self.partitioner.max_candidates = int(self.max_blocksize_candidates)
+        self.partitioner.partition_mode = str(self.partition_mode).lower()
+        self.partitioner.uniform_common_factor_blocks = bool(self.uniform_common_factor_blocks)
 
         # Optimizer configs
         self.frequency_optimizer.target_speedup = float(self.target_speedup)
