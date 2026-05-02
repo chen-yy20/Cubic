@@ -28,8 +28,9 @@ TAG = "tocache"
 
 # ToCa 默认超参
 TOCACHE_FRESH_RATIO = 0.1           # 刷新比例
-TOCACHE_FRESH_THRESHOLD = 4         # 初始刷新阈值
-TOCACHE_CAL_THRESHOLD = 4           # 计算阈值
+TOCACHE_FRESH_THRESHOLD = 4         # 历史/兼容字段；FireRed 路径下调度用 WARMUP + CAL
+TOCACHE_WARMUP_STEPS = 3
+TOCACHE_CAL_THRESHOLD = 4           # warmup 后 full 与 ToCa 的步长间隔
 
 quality_eval = True
 
@@ -52,7 +53,7 @@ def parse_args() -> argparse.Namespace:
     parser.add_argument("--prompt", type=str, default=PROMPT)
     parser.add_argument("--seed", type=int, default=49, help="与 ori/teacache/cubic 默认一致，便于质量对比")
     parser.add_argument("--true_cfg_scale", type=float, default=4.0)
-    parser.add_argument("--num_inference_steps", type=int, default=50)
+    parser.add_argument("--num_inference_steps", type=int, default=40)
     parser.add_argument(
         "--tocache_fresh_ratio",
         type=float,
@@ -63,13 +64,19 @@ def parse_args() -> argparse.Namespace:
         "--tocache_fresh_threshold",
         type=int,
         default=TOCACHE_FRESH_THRESHOLD,
-        help="ToCa 初始刷新阈值：前几个 step 使用 full 计算的间隔",
+        help="兼容参数；当前 FireRed tocache_firered 调度不读，请用 --tocache_warmup_steps 与 --tocache_cal_threshold",
+    )
+    parser.add_argument(
+        "--tocache_warmup_steps",
+        type=int,
+        default=TOCACHE_WARMUP_STEPS,
+        help="前若干去噪步强制 full 计算",
     )
     parser.add_argument(
         "--tocache_cal_threshold",
         type=int,
         default=TOCACHE_CAL_THRESHOLD,
-        help="ToCa 计算阈值：后续 step 中 full 计算的间隔",
+        help="warmup 步之后：每隔该步数做一次 full，其余为 ToCa（与实现中 interval 一致）",
     )
     parser.add_argument(
         "--disable_quality_eval",
@@ -142,18 +149,19 @@ def main() -> None:
     transformer.num_steps = args.num_inference_steps
     transformer.tocache_fresh_ratio = args.tocache_fresh_ratio
     transformer.tocache_fresh_threshold = args.tocache_fresh_threshold
+    transformer.tocache_warmup_steps = args.tocache_warmup_steps
     transformer.tocache_cal_threshold = args.tocache_cal_threshold
     if hasattr(transformer, "reset_tocache_state"):
         transformer.reset_tocache_state()
 
     logging.info(
         "[firered-tocache] prompt_id=%s seed=%d steps=%d fresh_ratio=%.2f "
-        "fresh_threshold=%d cal_threshold=%d output_dir=%s",
+        "warmup_steps=%d cal_interval=%d output_dir=%s",
         get_prompt_id(args.prompt),
         args.seed,
         args.num_inference_steps,
         args.tocache_fresh_ratio,
-        args.tocache_fresh_threshold,
+        args.tocache_warmup_steps,
         args.tocache_cal_threshold,
         output_dir,
     )
@@ -208,6 +216,7 @@ def main() -> None:
         "num_inference_steps": args.num_inference_steps,
         "tocache_fresh_ratio": args.tocache_fresh_ratio,
         "tocache_fresh_threshold": args.tocache_fresh_threshold,
+        "tocache_warmup_steps": args.tocache_warmup_steps,
         "tocache_cal_threshold": args.tocache_cal_threshold,
         "quality_eval": not args.disable_quality_eval,
     }

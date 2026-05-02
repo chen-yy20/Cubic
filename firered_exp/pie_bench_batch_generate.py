@@ -1,13 +1,19 @@
 """
 在 PIE-Bench++（parquet）上批量运行 FireRed-Image-Edit，支持多种加速/方法：
 
-  ori, teacache, jano, pab, cubic
+  ori, teacache, tocache, jano, pab, cubic
 
 与各自 `*_generate.py` 的管线一致；数据与提示词规则见 pie_bench_common.py。
 
 用法（在 Cubic 根目录）:
   python firered_exp/pie_bench_batch_generate.py --method teacache --parquet data/pie_++/...
+  # 已跑完前 43 条，从第 44 条接着跑（1 起算）:
+  python firered_exp/pie_bench_batch_generate.py --method ori --from_n 44
+  # 或 0 起算行下标:
+  python firered_exp/pie_bench_batch_generate.py --method ori --start 43
   python launch.py --model firered --method pie_bench -- --method jano --skip_existing
+
+jano / pab / teacache / tocache / cubic 默认对 pie_bench/ori/{id}/ 下 ori 结果做 PSNR/SSIM/LPIPS（与 teacache_generate 等一致），加 --disable_quality_eval 可关。
 """
 
 from __future__ import annotations
@@ -22,6 +28,7 @@ from typing import Any
 
 import pyarrow.parquet as pq
 import torch
+from PIL import Image
 
 _CUBIC_ROOT = Path(__file__).resolve().parent.parent
 _FIRERED_EXP = Path(__file__).resolve().parent
@@ -36,17 +43,42 @@ from pie_bench_common import (
     image_bytes_to_pil,
     target_prompt_to_hpsv3_caption,
 )
+from utils.quality_metric import evaluate_quality_with_origin
 from utils.results import save_params_and_metrics
 
 MODEL_PATH = "/home/fit/zhaijdcyy/WORK/models/FireRed-Image-Edit-1.0"
 DEFAULT_PARQUET = str(_CUBIC_ROOT / "data/pie_++/V1-00000-of-00001.parquet")
 
-PIE_METHODS = ("ori", "teacache", "jano", "pab", "cubic")
+PIE_METHODS = ("ori", "teacache", "tocache", "jano", "pab", "cubic")
+# 与 ori_generate 的「无加速」结果对比时，需先在 pie_bench/ori 下存在对应 id 的 ori 图
+QUALITY_VS_ORI_METHODS = ("jano", "pab", "teacache", "tocache", "cubic")
 
 
 def _sync_cuda() -> None:
     if torch.cuda.is_available():
         torch.cuda.synchronize()
+
+
+def resolve_pie_bench_ori_baseline(
+    out_root: Path,
+    sample_id: str,
+    model_id: str,
+    custom_root: Path | None,
+) -> str | None:
+    """
+    默认路径: {out_root}/ori/{id}/ori_pie_{id}_{model}.png
+    若设 custom_root 则先查: {custom_root}/ori/{id}/...
+    """
+    name = f"ori_pie_{sample_id}_{model_id}.png"
+    bases: list[Path] = []
+    if custom_root is not None:
+        bases.append(Path(custom_root))
+    bases.append(out_root)
+    for base in bases:
+        p = (base / "ori" / sample_id / name).resolve()
+        if p.is_file():
+            return str(p)
+    return None
 
 
 def _init_logging() -> None:
@@ -68,6 +100,8 @@ def _monkey_import(method: str) -> None:
         import baseline.PAB_firered  # noqa: F401
     elif method == "jano":
         import baseline.jano_firered  # noqa: F401
+    elif method == "tocache":
+        import baseline.tocache_firered  # noqa: F401
 
 
 def load_pipeline(
@@ -121,6 +155,15 @@ def setup_transformer(
         tr.teacache_cache_device = next(tr.parameters()).device
         if hasattr(tr, "reset_teacache_state"):
             tr.reset_teacache_state()
+    elif method == "tocache":
+        tr.enable_tocache = True
+        tr.num_steps = args.num_inference_steps
+        tr.tocache_fresh_ratio = args.tocache_fresh_ratio
+        tr.tocache_fresh_threshold = args.tocache_fresh_threshold
+        tr.tocache_warmup_steps = args.tocache_warmup_steps
+        tr.tocache_cal_threshold = args.tocache_cal_threshold
+        if hasattr(tr, "reset_tocache_state"):
+            tr.reset_tocache_state()
     elif method == "pab":
         pab_cooldown_steps = args.num_inference_steps - args.pab_cooldown_steps_offset
         tr.enable_pab = True
@@ -154,6 +197,8 @@ def reset_method_state(method: str, pipeline: Any) -> None:
     tr = pipeline.transformer
     if method == "teacache" and hasattr(tr, "reset_teacache_state"):
         tr.reset_teacache_state()
+    elif method == "tocache" and hasattr(tr, "reset_tocache_state"):
+        tr.reset_tocache_state()
     elif method == "pab" and hasattr(tr, "reset_pab_state"):
         tr.reset_pab_state()
     elif method == "jano" and hasattr(tr, "reset_jano_state"):
@@ -197,6 +242,11 @@ def method_params_extra(method: str, args: argparse.Namespace) -> dict[str, Any]
     d: dict[str, Any] = {"acceleration": method}
     if method == "teacache":
         d["rel_l1_thresh"] = args.rel_l1_thresh
+    elif method == "tocache":
+        d["tocache_fresh_ratio"] = args.tocache_fresh_ratio
+        d["tocache_fresh_threshold"] = args.tocache_fresh_threshold
+        d["tocache_warmup_steps"] = args.tocache_warmup_steps
+        d["tocache_cal_threshold"] = args.tocache_cal_threshold
     elif method == "pab":
         d["pab_warmup_steps"] = args.pab_warmup_steps
         d["pab_cooldown_steps"] = args.num_inference_steps - args.pab_cooldown_steps_offset
@@ -234,7 +284,7 @@ def method_params_extra(method: str, args: argparse.Namespace) -> dict[str, Any]
 
 def parse_args() -> argparse.Namespace:
     p = argparse.ArgumentParser(
-        description="Batch FireRed on PIE-Bench++ (ori / teacache / jano / pab / cubic)"
+        description="Batch FireRed on PIE-Bench++ (ori / teacache / tocache / jano / pab / cubic)"
     )
     p.add_argument(
         "--method",
@@ -267,20 +317,50 @@ def parse_args() -> argparse.Namespace:
         "--num_inference_steps",
         type=int,
         default=None,
-        help="未指定时：cubic=40，其余=50（与各 generate 默认一致）",
+        help="未指定时：cubic 与 tocache=40，其余=50（与各 generate 默认一致）",
     )
     p.add_argument(
         "--edit_lead_in",
         type=str,
         default="Edit the image: ",
     )
-    p.add_argument("--start", type=int, default=0)
-    p.add_argument("--end", type=int, default=None)
+    p.add_argument(
+        "--start",
+        type=int,
+        default=None,
+        help="从 parquet 第几行下标开始（0 起算、含）。已跑完前 43 条则传 43。与 --from_n 二选一",
+    )
+    p.add_argument(
+        "--from_n",
+        type=int,
+        default=None,
+        metavar="N",
+        help="从第 N 条开始（1 起算）。已跑完前 43 条则传 44；与 --start 二选一",
+    )
+    p.add_argument(
+        "--end",
+        type=int,
+        default=None,
+        help="行下标结束（不含）；仅在不使用 --ids 时生效",
+    )
     p.add_argument("--ids", type=str, default=None)
     p.add_argument("--skip_existing", action="store_true")
     p.add_argument("--fail_fast", action="store_true")
     p.add_argument(
         "--disable_progress_bar", action="store_true", default=True
+    )
+    p.add_argument(
+        "--disable_quality_eval",
+        action="store_true",
+        default=False,
+        help="关闭相对 pie_bench/ori 的 PSNR/SSIM/LPIPS（jano/pab/teacache/tocache/cubic 时默认会评）",
+    )
+    p.add_argument(
+        "--quality_baseline_root",
+        type=Path,
+        default=None,
+        help="ori 集根：期望存在 {此路径}/ori/{id}/ori_pie_{id}_{model}.png；"
+        "默认用 output_root（即与 pie_bench 同级的 ori/）",
     )
     # teacache
     p.add_argument(
@@ -288,6 +368,31 @@ def parse_args() -> argparse.Namespace:
         type=float,
         default=0.2,
         help="[teacache] 同 teacache_generate",
+    )
+    # tocache
+    p.add_argument(
+        "--tocache_fresh_ratio",
+        type=float,
+        default=0.1,
+        help="[tocache] 同 tocache_generate",
+    )
+    p.add_argument(
+        "--tocache_fresh_threshold",
+        type=int,
+        default=4,
+        help="[tocache] 同 tocache_generate；FireRed 路径下调度未读此值，以 warmup/cal 为准",
+    )
+    p.add_argument(
+        "--tocache_warmup_steps",
+        type=int,
+        default=3,
+        help="[tocache] 前若干 denoise 步强制 full，与 tocache_firered 中 warm-up 一致",
+    )
+    p.add_argument(
+        "--tocache_cal_threshold",
+        type=int,
+        default=4,
+        help="[tocache] 全量计算步间隔：warmup 之后每隔该步数做一次 full，其余为 ToCa（_cal_type 的 interval）",
     )
     # pab
     p.add_argument("--pab_warmup_steps", type=int, default=5)
@@ -304,8 +409,8 @@ def parse_args() -> argparse.Namespace:
     p.add_argument("--jano_analyze_block_h", type=int, default=4)
     p.add_argument("--jano_analyze_block_w", type=int, default=4)
     # cubic
-    p.add_argument("--cubic_target_speedup", type=float, default=8.0)
-    p.add_argument("--cubic_cond_target_speedup", type=float, default=8.0)
+    p.add_argument("--cubic_target_speedup", type=float, default=4.0)
+    p.add_argument("--cubic_cond_target_speedup", type=float, default=4.0)
     p.add_argument("--cubic_warmup_fraction", type=float, default=0.1)
     p.add_argument("--cubic_cooldown_fraction", type=float, default=0.1)
     p.add_argument("--cubic_anchor_interval", type=int, default=8)
@@ -322,8 +427,23 @@ def main() -> None:
     _init_logging()
     args = parse_args()
     if args.num_inference_steps is None:
-        args.num_inference_steps = 40 if args.method == "cubic" else 50
-    tag = args.tag or args.method
+        if args.method in ("cubic", "tocache"):
+            args.num_inference_steps = 40
+        else:
+            args.num_inference_steps = 50
+
+    tag = args.tag if args.tag is not None else args.method
+
+    if args.from_n is not None and args.start is not None:
+        raise SystemExit("请只使用 --from_n 或 --start 之一，不要同时传两个")
+    if args.from_n is not None:
+        if args.from_n < 1:
+            raise SystemExit("--from_n 须为 >= 1 的整数")
+        start_off = args.from_n - 1
+    else:
+        start_off = 0 if args.start is None else args.start
+    if start_off < 0:
+        raise SystemExit("起点不能为负：请检查 --start 或 --from_n")
 
     pq_path = args.parquet
     if not pq_path.is_file():
@@ -345,7 +465,24 @@ def main() -> None:
             raise ValueError("没有匹配的 --ids")
     else:
         e = args.end if args.end is not None else n
-        indices = list(range(args.start, min(e, n)))
+        indices = list(range(0, min(e, n)))
+
+    if start_off:
+        if start_off >= len(indices):
+            logging.warning(
+                "起点偏移 %d 超出本任务行数 %d，无可跑样本",
+                start_off,
+                len(indices),
+            )
+            indices = []
+        else:
+            logging.info(
+                "从任务列表第 %d 条开始（已跳过前 %d 条，对应行下标从 %d 起）",
+                start_off + 1,
+                start_off,
+                start_off,
+            )
+            indices = indices[start_off:]
 
     model_id = Path(args.model_path).name
     out_root = args.output_root or (
@@ -353,13 +490,18 @@ def main() -> None:
     )
     out_root = out_root.resolve()
     out_root.mkdir(parents=True, exist_ok=True)
+    want_quality = (
+        (not args.disable_quality_eval)
+        and (args.method in QUALITY_VS_ORI_METHODS)
+    )
     logging.info(
-        "PIE-Bench 批量 method=%s tag=%s rows=%d job=%d out=%s",
+        "PIE-Bench 批量 method=%s tag=%s rows=%d job=%d out=%s quality_vs_ori=%s",
         args.method,
         tag,
         n,
         len(indices),
         out_root,
+        want_quality,
     )
 
     logging.info("Loading pipeline (method=%s)…", args.method)
@@ -441,6 +583,38 @@ def main() -> None:
         logging.info("[%d/%d] %s -> %s", j + 1, len(indices), sample_id, out_path)
         done += 1
 
+        quality_metrics: dict[str, Any] | None = None
+        q_elapsed_ms: float | None = None
+        baseline_str: str | None = None
+        if want_quality:
+            baseline_str = resolve_pie_bench_ori_baseline(
+                out_root, sample_id, model_id, args.quality_baseline_root
+            )
+            if baseline_str is None:
+                logging.warning(
+                    "%s: 未找到 ori 对照图，跳过质量评测（需 %s/ori/%s/ori_pie_%s_%s.png）",
+                    sample_id,
+                    args.quality_baseline_root or out_root,
+                    sample_id,
+                    sample_id,
+                    model_id,
+                )
+            else:
+                tq0 = time.perf_counter()
+                qres = evaluate_quality_with_origin(
+                    str(out_path),
+                    tag,
+                    save_metrics=False,
+                    baseline_path=baseline_str,
+                    output_dir=str(run_dir),
+                )
+                tq1 = time.perf_counter()
+                q_elapsed_ms = (tq1 - tq0) * 1000.0
+                if qres and qres.get("metrics") is not None:
+                    quality_metrics = qres["metrics"]
+                else:
+                    logging.warning("%s: 质量评测未返回指标", sample_id)
+
         extra: dict[str, Any] = {
             "parquet": str(pq_path),
             "row_index": i,
@@ -478,15 +652,25 @@ def main() -> None:
             "seed": args.seed,
             "true_cfg_scale": args.true_cfg_scale,
             "num_inference_steps": args.num_inference_steps,
+            "quality_eval": want_quality and quality_metrics is not None,
+            "quality_baseline": baseline_str,
+            "quality_eval_suppressed": args.disable_quality_eval
+            or (args.method not in QUALITY_VS_ORI_METHODS),
             "pie_bench": extra,
         }
         params.update(mextra)
+        timing: dict[str, Any] = {
+            "inference_e2e_ms": elapsed_ms,
+            "per_sample": True,
+        }
+        if q_elapsed_ms is not None:
+            timing["quality_eval_ms"] = q_elapsed_ms
         save_params_and_metrics(
             str(run_dir),
             tag,
             params,
-            {"inference_e2e_ms": elapsed_ms, "per_sample": True},
-            quality_metrics=None,
+            timing,
+            quality_metrics=quality_metrics,
         )
 
     logging.info("Done. 成功 %d / 计划 %d 条。", done, len(indices))

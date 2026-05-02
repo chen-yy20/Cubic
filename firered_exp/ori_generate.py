@@ -74,7 +74,7 @@ def parse_args() -> argparse.Namespace:
     parser.add_argument(
         "--num_inference_steps",
         type=int,
-        default=50,
+        default=40,
         help="Number of inference steps",
     )
     parser.add_argument(

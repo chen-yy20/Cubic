@@ -52,7 +52,7 @@ def parse_args() -> argparse.Namespace:
     parser.add_argument("--prompt", type=str, default=PROMPT)
     parser.add_argument("--seed", type=int, default=49, help="与 ori/teacache/cubic 默认一致，便于质量对比")
     parser.add_argument("--true_cfg_scale", type=float, default=4.0)
-    parser.add_argument("--num_inference_steps", type=int, default=50)
+    parser.add_argument("--num_inference_steps", type=int, default=40)
     parser.add_argument(
         "--pab_warmup_steps",
         type=int,

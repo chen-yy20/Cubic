@@ -9,3 +9,12 @@ uv.lock
 *.sh
 detectron2/
 data/
+log/
+cheat/
+# wan_exp/ori_batch_generate.py
+# wan_exp/pab_batch_generate.py
+# wan_exp/teacache_batch_generate.py
+# wan_exp/tocache_batch_generate.py
+# eval_vbench/
+pre_exp/
+# VBench-master/

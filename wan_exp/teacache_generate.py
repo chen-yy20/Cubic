@@ -724,6 +724,15 @@ def _parse_args():
     parser.add_argument('--teacache_thresh', type=float, default=0.07)
     parser.add_argument('--use_ret_steps', action='store_true', default=False)
     parser.add_argument('--output_dir', type=str, default=None)
+    parser.add_argument(
+        '--ori_baseline_root',
+        type=str,
+        default=None,
+        help=(
+            'Ori 结果根目录（含各 prompt_id 子目录）。设置后与对应 prompt 的 ori 视频比对质量；'
+            '用于输出目录名为 teacache_t0pXX 等无法自动推断的情形。默认 None 沿用原推断逻辑。'
+        ),
+    )
 
     args = parser.parse_args()
 
@@ -883,6 +892,17 @@ def generate(args):
         os.makedirs(output_dir, exist_ok=True)
         args.save_file = os.path.join(output_dir, filename)
 
+        ori_root = getattr(args, 'ori_baseline_root', None)
+        quality_baseline_path = None
+        if ori_root:
+            ori_root_abs = os.path.abspath(
+                ori_root if os.path.isabs(ori_root) else os.path.join(_CUBIC_ROOT, ori_root)
+            )
+            _pid = get_prompt_id(prompt_for_name)
+            quality_baseline_path = os.path.join(
+                ori_root_abs, _pid, f'ori_{_pid}_{args.task}.mp4'
+            )
+
         if 't2i' in args.task:
             logging.info(f'Saving generated image to {args.save_file}')
             cache_image(
@@ -907,7 +927,7 @@ def generate(args):
             image_path=args.save_file,
             tag=TAG,
             save_metrics=False,
-            baseline_path=None,
+            baseline_path=quality_baseline_path,
             output_dir=output_dir,
         )
         quality_metrics = quality_result['metrics'] if quality_result is not None else None
@@ -940,12 +960,13 @@ if __name__ == '__main__':
             'method': 'teacache',
             'model_id': model_id,
             'model_path': MODEL_PATH,
-            'prompt': PROMPT,
+            'prompt': args.prompt,
             'task': args.task,
             'size': args.size,
             'base_seed': args.base_seed,
             'teacache_thresh': args.teacache_thresh,
             'use_ret_steps': args.use_ret_steps,
+            'ori_baseline_root': getattr(args, 'ori_baseline_root', None),
         }
         params_path = save_params_and_metrics(
             out_dir,

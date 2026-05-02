@@ -347,36 +347,33 @@ class JanoKVCacheAttnProcessor:
                 encoder_hidden_states_mask, attention_mask, image_rotary_emb
             )
 
-        step_index = int(getattr(tr, "_jano_current_step", 0))
         branch_key = str(getattr(tr, "_jano_current_branch", "branch_0"))
 
-        # 获取 step_level
-        mm.update_step_level(step_index)
-        step_level = mm.step_level
+        # step_level 与 compute_mask 在 jano_forward 里每 denoise 步只更新一次，避免
+        # 60 层 × 每步重复 update_step_level（内含 cudaMem 查询与 tqdm 写）导致比 ori 更慢。
+        step_level = int(getattr(tr, "_jano_step_level", 0))
 
-        # L0/L3：全量计算，不使用 KV Cache
+        # L0/L3：全量计算并刷新 K/V 缓存
         if step_level in (0, 3):
-            output = self._base_processor(
+            out = self._base_processor(
                 attn, hidden_states, encoder_hidden_states,
                 encoder_hidden_states_mask, attention_mask, image_rotary_emb
             )
-            # 缓存本步的 K/V 用于后续 step
             self._cache_kv(tr, attn, hidden_states, encoder_hidden_states, branch_key)
-            return output
+            return out
 
-        # L1/L2：使用 KV Cache
-        compute_mask = mm.get_compute_mask()
-        if compute_mask is None:
+        compute_mask = getattr(tr, "_jano_compute_mask_dev", None)
+        dyn_idx = getattr(tr, "_jano_dynamic_idx", None)
+        if compute_mask is None or dyn_idx is None:
             return self._base_processor(
                 attn, hidden_states, encoder_hidden_states,
                 encoder_hidden_states_mask, attention_mask, image_rotary_emb
             )
 
-        # 执行带 KV Cache 的 attention
         return self._forward_with_kv_cache(
             attn, hidden_states, encoder_hidden_states,
             encoder_hidden_states_mask, attention_mask, image_rotary_emb,
-            compute_mask, branch_key
+            compute_mask, dyn_idx, branch_key
         )
 
     def _cache_kv(self, tr, attn, hidden_states, encoder_hidden_states, branch_key):
@@ -401,7 +398,7 @@ class JanoKVCacheAttnProcessor:
     def _forward_with_kv_cache(
         self, attn, hidden_states, encoder_hidden_states,
         encoder_hidden_states_mask, attention_mask, image_rotary_emb,
-        compute_mask, branch_key
+        compute_mask, dyn_idx: torch.Tensor, branch_key
     ):
         """使用 KV Cache 执行 attention。"""
         tr = self.transformer_ref()
@@ -417,24 +414,32 @@ class JanoKVCacheAttnProcessor:
 
         # 2. 获取 K/V（静态的从缓存，动态的重新计算）
         if cached is not None:
-            # 有缓存，混合使用
-            mask_dev = compute_mask.to(dev)
+            n_dyn = int(dyn_idx.numel())
+            total_img = int(compute_mask.numel())
+            # 动态占比极高时，布尔切片 + clone 合并往往比单次整段 Linear 更慢，直接全算
+            if n_dyn == 0 or n_dyn * 10 > total_img * 9:
+                img_key = attn.to_k(hidden_states)
+                img_value = attn.to_v(hidden_states)
+            else:
+                img_key_cached = cached["img_key"]
+                img_val_cached = cached["img_value"]
+                if img_key_cached.device != dev:
+                    img_key_cached = img_key_cached.to(dev, non_blocking=True)
+                    img_val_cached = img_val_cached.to(dev, non_blocking=True)
 
-            # img K：静态从缓存，动态重新计算
-            img_key_static = cached["img_key"].to(dev)
-            # 只为动态 token 计算新的 K
-            img_key_dynamic = attn.to_k(hidden_states[:, mask_dev, :])
-            # 合并
-            img_key = img_key_static.clone()
-            img_key[:, mask_dev, :] = img_key_dynamic
+                # index_select 比 hidden_states[:, bool_mask] 更易形成连续 GEMM
+                h_sel = hidden_states.index_select(1, dyn_idx)
+                img_key_dynamic = attn.to_k(h_sel)
+                img_value_dynamic = attn.to_v(h_sel)
 
-            # img V：同理
-            img_value_static = cached["img_value"].to(dev)
-            img_value_dynamic = attn.to_v(hidden_states[:, mask_dev, :])
-            img_value = img_value_static.clone()
-            img_value[:, mask_dev, :] = img_value_dynamic
+                img_key = torch.empty_like(img_key_cached)
+                img_key.copy_(img_key_cached)
+                img_key.index_copy_(1, dyn_idx, img_key_dynamic)
 
-            # txt K/V：文本 token 通常全部重新计算（或也可缓存）
+                img_value = torch.empty_like(img_val_cached)
+                img_value.copy_(img_val_cached)
+                img_value.index_copy_(1, dyn_idx, img_value_dynamic)
+
             txt_key = attn.add_k_proj(encoder_hidden_states)
             txt_value = attn.add_v_proj(encoder_hidden_states)
         else:
@@ -681,6 +686,35 @@ def jano_forward(
         joint_attention_mask = torch.cat([encoder_hidden_states_mask, image_mask], dim=1)
         block_attention_kwargs["attention_mask"] = joint_attention_mask
 
+    # 每 denoise 步只更新一次 step_level / 掩码 GPU 张量，避免 60×attention 重复
+    # update_step_level（含 cuda 显存查询与 tqdm）与 get_compute_mask().to(device)。
+    if enable_jano:
+        mm = getattr(self, "_jano_mm", None)
+        if mm is not None:
+            mm.update_step_level(int(self._jano_current_step))
+            self._jano_step_level = int(mm.step_level)
+            if mm.masks_ready and mm.step_level in (1, 2):
+                cm = mm.get_compute_mask()
+                if cm is not None:
+                    cm_dev = cm.to(hidden_states.device, non_blocking=True)
+                    self._jano_compute_mask_dev = cm_dev
+                    if cm_dev.dim() == 1:
+                        self._jano_dynamic_idx = torch.nonzero(cm_dev, as_tuple=False).view(-1).long()
+                    else:
+                        self._jano_dynamic_idx = (
+                            torch.nonzero(cm_dev[0], as_tuple=False).squeeze(-1).long()
+                        )
+                else:
+                    self._jano_compute_mask_dev = None
+                    self._jano_dynamic_idx = None
+            else:
+                self._jano_compute_mask_dev = None
+                self._jano_dynamic_idx = None
+        else:
+            self._jano_step_level = 0
+            self._jano_compute_mask_dev = None
+            self._jano_dynamic_idx = None
+
     # Transformer blocks（KV Cache 在 attention processor 内部处理）
     for index_block, block in enumerate(self.transformer_blocks):
         if torch.is_grad_enabled() and self.gradient_checkpointing:
@@ -724,6 +758,9 @@ def jano_forward(
 def reset_jano_state(self) -> None:
     """新一轮推理前调用，清空所有 Jano 运行时状态。"""
     _reset_jano_runtime(self)
+    for _attr in ("_jano_step_level", "_jano_compute_mask_dev", "_jano_dynamic_idx"):
+        if hasattr(self, _attr):
+            delattr(self, _attr)
     if hasattr(self, "_jano_mm"):
         self._jano_mm.clear_cache()
     if hasattr(self, "_jano_da"):

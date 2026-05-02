@@ -615,7 +615,7 @@ def infer_origin_path_from_output_dir(generated_path: str, output_dir: Optional[
     gen_abs = os.path.abspath(generated_path)
     filename = os.path.basename(gen_abs)
     ori_filename = filename.replace(f"{tag}_", "ori_", 1)
-    for _prefix in ("cubic_", "teacache_", "tocache_", "pab_", "jano_"):
+    for _prefix in ("cubic_", "teacache_", "taylorseer_", "tocache_", "pab_", "jano_"):
         if ori_filename == filename and filename.startswith(_prefix):
             ori_filename = filename.replace(_prefix, "ori_", 1)
             break
@@ -628,18 +628,18 @@ def infer_origin_path_from_output_dir(generated_path: str, output_dir: Optional[
         method_dir = os.path.basename(os.path.dirname(out_abs))
         model_root = os.path.dirname(os.path.dirname(out_abs))
 
-        if method_dir in ("cubic", "teacache", "tocache", "pab", "jano"):
+        if method_dir in ("cubic", "teacache", "taylorseer", "tocache", "pab", "jano"):
             for prompt_candidate in prompt_dir_candidates:
                 candidates.append(os.path.join(model_root, "ori", prompt_candidate, ori_filename))
 
-        for _method_token in ("cubic", "teacache", "tocache", "pab", "jano"):
+        for _method_token in ("cubic", "teacache", "taylorseer", "tocache", "pab", "jano"):
             token = f"{os.sep}{_method_token}{os.sep}"
             if token in out_abs:
                 for prompt_candidate in prompt_dir_candidates:
                     ori_dir = os.path.join(model_root, "ori", prompt_candidate)
                     candidates.append(os.path.join(ori_dir, ori_filename))
 
-    for _method_token in ("cubic", "teacache", "tocache", "pab", "jano"):
+    for _method_token in ("cubic", "teacache", "taylorseer", "tocache", "pab", "jano"):
         token = f"{os.sep}{_method_token}{os.sep}"
         if token in gen_abs:
             ori_abs = gen_abs.replace(token, f"{os.sep}ori{os.sep}")

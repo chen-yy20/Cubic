@@ -20,13 +20,13 @@ IMAGE_PATH = "/home/fit/zhaijdcyy/WORK/Cubic/firered_exp/examples/cola.png"
 PROMPT = "Transform the object into a realistic miniature product by carefully holding it between your thumb and forefinger."
 TAG = "cubic"
 
-SPEEDUP = 8.0
-COND_SPEEDUP = 8.0
+SPEEDUP = 2.0
+COND_SPEEDUP = 2.0
 WARMUP_FRACTION = 0.1
 COOLDOWN_FRACTION = 0.1
 ANCHOR_INTERVAL = 8
 
-visualize_curvature = True  # 是否启用曲率可视化（会增加额外计算开销）
+visualize_curvature = False  # 是否启用曲率可视化（会增加额外计算开销）
 quality_eval = True
 
 

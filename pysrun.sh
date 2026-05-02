@@ -20,7 +20,7 @@ export GPUS_PER_NODE=${GPUS_PER_NODE:-1}
 export MASTER_PORT=$(expr $RANDOM % 10000 + 50000)
 
 srun \
-    -p "${PARTITION:-a01}" \
+    -p "${PARTITION:-h01}" \
     -K \
     -N "${NNODES:-1}" \
     --job-name="${JOB_NAME:-Jano}" \

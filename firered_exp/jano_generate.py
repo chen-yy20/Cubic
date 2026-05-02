@@ -86,7 +86,7 @@ def parse_args() -> argparse.Namespace:
     parser.add_argument("--prompt",       type=str,  default=PROMPT)
     parser.add_argument("--seed",         type=int,  default=49)
     parser.add_argument("--true_cfg_scale", type=float, default=4.0)
-    parser.add_argument("--num_inference_steps", type=int, default=50)
+    parser.add_argument("--num_inference_steps", type=int, default=40)
 
     # Jano 超参
     parser.add_argument("--jano_warmup_steps",       type=int,   default=JANO_WARMUP_STEPS)

@@ -1,0 +1,79 @@
+{
+    "metadata": {
+        "videos_dir": "/home/zlq/diffusion/vbench_result/wan2.1/JANO_344_0103_2_3_warm6",
+        "prompt_count": 3,
+        "dimensions": [
+            "subject_consistency",
+            "imaging_quality"
+        ],
+        "raw_result_path": "/home/zlq/diffusion/VBench-master/vbench_result/wan_evaluate/custom_20251113_224324_eval_results.json"
+    },
+    "dimensions": {
+        "subject_consistency": {
+            "average_score": 0.9649304861823718,
+            "videos": [
+                {
+                    "video": "a pink bird-0.mp4",
+                    "prompt": "a pink bird",
+                    "score": 0.9787363603711128
+                },
+                {
+                    "video": "skis and a snowboard-0.mp4",
+                    "prompt": "skis and a snowboard",
+                    "score": 0.9164385121315718
+                },
+                {
+                    "video": "A tranquil tableau of a cup-0.mp4",
+                    "prompt": "A tranquil tableau of a cup",
+                    "score": 0.9996165860444307
+                }
+            ]
+        },
+        "imaging_quality": {
+            "average_score": 0.7212089967138974,
+            "videos": [
+                {
+                    "video": "a pink bird-0.mp4",
+                    "prompt": "a pink bird",
+                    "score": 76.65532825611255
+                },
+                {
+                    "video": "skis and a snowboard-0.mp4",
+                    "prompt": "skis and a snowboard",
+                    "score": 75.69613713393977
+                },
+                {
+                    "video": "A tranquil tableau of a cup-0.mp4",
+                    "prompt": "A tranquil tableau of a cup",
+                    "score": 64.01123362411687
+                }
+            ]
+        }
+    },
+    "per_video": {
+        "a pink bird-0.mp4": {
+            "prompt": "a pink bird",
+            "mean_score": 38.817032308241835,
+            "dimension_scores": {
+                "subject_consistency": 0.9787363603711128,
+                "imaging_quality": 76.65532825611255
+            }
+        },
+        "skis and a snowboard-0.mp4": {
+            "prompt": "skis and a snowboard",
+            "mean_score": 38.306287823035674,
+            "dimension_scores": {
+                "subject_consistency": 0.9164385121315718,
+                "imaging_quality": 75.69613713393977
+            }
+        },
+        "A tranquil tableau of a cup-0.mp4": {
+            "prompt": "A tranquil tableau of a cup",
+            "mean_score": 32.50542510508065,
+            "dimension_scores": {
+                "subject_consistency": 0.9996165860444307,
+                "imaging_quality": 64.01123362411687
+            }
+        }
+    }
+}

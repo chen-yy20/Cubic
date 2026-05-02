@@ -28,7 +28,9 @@ from wan.configs import WAN_CONFIGS, SIZE_CONFIGS, MAX_AREA_CONFIGS, SUPPORTED_S
 from wan.utils.utils import cache_video, cache_image, str2bool
 
 # Cubic utilities for timing and quality evaluation
-sys.path.insert(0, os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
+_WAN_EXP_ROOT = os.path.dirname(os.path.abspath(__file__))
+_CUBIC_ROOT = os.path.dirname(_WAN_EXP_ROOT)
+sys.path.insert(0, _CUBIC_ROOT)
 from utils.quality_metric import evaluate_quality_with_origin
 from utils.results import get_prompt_id, save_params_and_metrics
 from utils.timer import get_time_statistics_dict, init_timer, print_time_statistics, save_time_stats_to_file, get_timer
@@ -760,6 +762,15 @@ def _parse_args():
         type=str,
         default=None,
         help="Output directory for results.")
+    parser.add_argument(
+        "--ori_baseline_root",
+        type=str,
+        default=None,
+        help=(
+            "Ori 结果根目录（含各 prompt_id 子目录）。设置后与对应 prompt 的 ori 视频比对质量；"
+            "用于输出目录名为 pab_s*_c_* 等无法自动推断的情形。"
+        ),
+    )
 
     args = parser.parse_args()
     # Set default values
@@ -999,12 +1010,23 @@ def generate(args):
                 normalize=True,
                 value_range=(-1, 1))
 
+        ori_root = getattr(args, "ori_baseline_root", None)
+        quality_baseline_path = None
+        if ori_root:
+            ori_root_abs = os.path.abspath(
+                ori_root if os.path.isabs(ori_root) else os.path.join(_CUBIC_ROOT, ori_root)
+            )
+            _pid = get_prompt_id(args.prompt)
+            quality_baseline_path = os.path.join(
+                ori_root_abs, _pid, f"ori_{_pid}_{args.task}.mp4"
+            )
+
         # Quality evaluation
         quality_result = evaluate_quality_with_origin(
             image_path=args.save_file,
             tag=TAG,
             save_metrics=False,
-            baseline_path=None,
+            baseline_path=quality_baseline_path,
             output_dir=output_dir,
         )
         quality_metrics = quality_result['metrics'] if quality_result is not None else None
@@ -1015,6 +1037,7 @@ def generate(args):
 
 
 if __name__ == "__main__":
+    os.chdir(_CUBIC_ROOT)
     args = _parse_args()
     quality_metrics = generate(args)
     print_time_statistics(timer_names=REQUIRED_TIMER_NAMES)
@@ -1031,7 +1054,7 @@ if __name__ == "__main__":
             'method': 'pab',
             'model_id': model_id,
             'model_path': MODEL_PATH,
-            'prompt': PROMPT,
+            'prompt': args.prompt,
             'task': args.task,
             'size': args.size,
             'base_seed': args.base_seed,
@@ -1040,6 +1063,7 @@ if __name__ == "__main__":
             'pab_warmup': args.pab_warmup,
             'pab_cooldown': args.pab_cooldown,
             'pab_layer_interval': args.pab_layer_interval,
+            'ori_baseline_root': getattr(args, 'ori_baseline_root', None),
         }
         params_path = save_params_and_metrics(
             output_dir,

@@ -202,6 +202,15 @@ def _parse_args():
         default='./results/wan',
         help='output_dir.',
     )
+    parser.add_argument(
+        '--ori_baseline_root',
+        type=str,
+        default=None,
+        help=(
+            'Ori 结果根目录（含各 prompt_id 子目录）。设置后与对应 prompt 的 ori 视频比对质量；'
+            '用于输出目录为 tocache_* 等无法单靠路径推断 ori 的情形。默认 None。'
+        ),
+    )
 
     args = parser.parse_args()
     args.task = 't2v-1.3B' if '1.3B' in MODEL_PATH else 't2v-14B'
@@ -305,11 +314,22 @@ def generate(args):
             value_range=(-1, 1),
         )
 
+        ori_root = getattr(args, 'ori_baseline_root', None)
+        quality_baseline_path = None
+        if ori_root:
+            ori_root_abs = os.path.abspath(
+                ori_root if os.path.isabs(ori_root) else os.path.join(_CUBIC_ROOT, ori_root)
+            )
+            _pid = get_prompt_id(PROMPT)
+            quality_baseline_path = os.path.join(
+                ori_root_abs, _pid, f'ori_{_pid}_{args.task}.mp4'
+            )
+
         quality_result = evaluate_quality_with_origin(
             image_path=args.save_file,
             tag=TAG,
             save_metrics=False,
-            baseline_path=None,
+            baseline_path=quality_baseline_path,
             output_dir=output_dir,
         )
         quality_metrics = quality_result['metrics'] if quality_result is not None else None
@@ -346,6 +366,7 @@ if __name__ == '__main__':
             'task': args.task,
             'size': args.size,
             'base_seed': args.base_seed,
+            'ori_baseline_root': getattr(args, 'ori_baseline_root', None),
         }
         params_path = save_params_and_metrics(
             out_dir,

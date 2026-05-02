@@ -1,0 +1,36 @@
+{
+    "subject_consistency": [
+        0.9649304861823718,
+        [
+            {
+                "video_path": "/home/zlq/diffusion/VBench-master/vbench_result/wan_evaluate/vbench_subset_jjiksp78/a pink bird-0.mp4",
+                "video_results": 0.9787363603711128
+            },
+            {
+                "video_path": "/home/zlq/diffusion/VBench-master/vbench_result/wan_evaluate/vbench_subset_jjiksp78/skis and a snowboard-0.mp4",
+                "video_results": 0.9164385121315718
+            },
+            {
+                "video_path": "/home/zlq/diffusion/VBench-master/vbench_result/wan_evaluate/vbench_subset_jjiksp78/A tranquil tableau of a cup-0.mp4",
+                "video_results": 0.9996165860444307
+            }
+        ]
+    ],
+    "imaging_quality": [
+        0.7212089967138974,
+        [
+            {
+                "video_path": "/home/zlq/diffusion/VBench-master/vbench_result/wan_evaluate/vbench_subset_jjiksp78/a pink bird-0.mp4",
+                "video_results": 76.65532825611255
+            },
+            {
+                "video_path": "/home/zlq/diffusion/VBench-master/vbench_result/wan_evaluate/vbench_subset_jjiksp78/skis and a snowboard-0.mp4",
+                "video_results": 75.69613713393977
+            },
+            {
+                "video_path": "/home/zlq/diffusion/VBench-master/vbench_result/wan_evaluate/vbench_subset_jjiksp78/A tranquil tableau of a cup-0.mp4",
+                "video_results": 64.01123362411687
+            }
+        ]
+    ]
+}

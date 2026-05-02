@@ -9,14 +9,19 @@ import sys
 SCRIPT_MAP = {
     "wan": {
         "ori": "wan_exp/ori_generate.py",
+        "ori_batch": "wan_exp/ori_batch_generate.py",
         "cubic": "wan_exp/cubic_generate.py",
         "teacache": "wan_exp/teacache_generate.py",
+        "teacache_batch": "wan_exp/teacache_batch_generate.py",
         "pab": "wan_exp/pab_generate.py",
+        "pab_batch": "wan_exp/pab_batch_generate.py",
         "tocache": "wan_exp/tocache_generate.py",
+        "tocache_batch": "wan_exp/tocache_batch_generate.py",
     },
     "firered": {
         "ori": "firered_exp/ori_generate.py",
         "cubic": "firered_exp/cubic_generate.py",
+        "taylorseer": "firered_exp/taylorseer_generate.py",
         "teacache": "firered_exp/teacache_generate.py",
         "pab": "firered_exp/PAB_generate.py",
         "tocache": "firered_exp/tocache_generate.py",
@@ -70,14 +75,16 @@ def main():
     repo_root = os.path.dirname(os.path.abspath(__file__))
     env = os.environ.copy()
 
-    if args.method == "ori":
+    if args.method in ("ori", "ori_batch"):
         env["ENABLE_JANO"] = "0"
     elif args.method == "jano":
         env["ENABLE_JANO"] = "1"
 
     extra_paths = [repo_root]
-    if args.method == "jano":
-        extra_paths.append(os.path.join(repo_root, "firered_exp"))
+    _firered_exp = os.path.join(repo_root, "firered_exp")
+    if args.model == "firered" or args.method == "jano":
+        if _firered_exp not in extra_paths:
+            extra_paths.append(_firered_exp)
     if env.get("PYTHONPATH") and env["PYTHONPATH"].strip():
         env["PYTHONPATH"] = os.pathsep.join(extra_paths + [env["PYTHONPATH"]])
     else:

@@ -1,0 +1,32 @@
+[
+    {
+        "prompt_en": "a pink bird",
+        "dimension": [
+            "subject_consistency",
+            "imaging_quality"
+        ],
+        "video_list": [
+            "/home/zlq/diffusion/VBench-master/vbench_result/wan_evaluate/vbench_subset_3tpncdl2/a pink bird-0.mp4"
+        ]
+    },
+    {
+        "prompt_en": "skis and a snowboard",
+        "dimension": [
+            "subject_consistency",
+            "imaging_quality"
+        ],
+        "video_list": [
+            "/home/zlq/diffusion/VBench-master/vbench_result/wan_evaluate/vbench_subset_3tpncdl2/skis and a snowboard-0.mp4"
+        ]
+    },
+    {
+        "prompt_en": "A tranquil tableau of a cup",
+        "dimension": [
+            "subject_consistency",
+            "imaging_quality"
+        ],
+        "video_list": [
+            "/home/zlq/diffusion/VBench-master/vbench_result/wan_evaluate/vbench_subset_3tpncdl2/A tranquil tableau of a cup-0.mp4"
+        ]
+    }
+]
