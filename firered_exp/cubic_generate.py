@@ -11,15 +11,11 @@ from PIL import Image
 from firered_cubic.pipeline import CubicQwenImageEditPlusPipeline
 from firered_cubic.transformer import CubicQwenImageTransformer2DModel
 
-from utils.launch_defaults import resolve_model_path
+from utils.launch_defaults import resolve_model_path, resolve_required_arg
 from utils.quality_metric import evaluate_quality_with_origin
 from utils.results import get_prompt_id, save_params_and_metrics
 from utils.timer import get_time_statistics_dict, init_timer, print_time_statistics, save_time_stats_to_file
 
-IMAGE_PATH = "/home/fit/zhaijdcyy/WORK/Cubic/firered_exp/examples/cola.png"
-IMAGE_PATH = "/home/chenyy/WORK/cyy/cubic/firered_exp/examples/cola.png"
-
-PROMPT = "Transform the object into a realistic miniature product by carefully holding it between your thumb and forefinger."
 REQUIRED_TIMER_NAMES = [
     "generate_e2e",
     "anchor_step_monitor",
@@ -30,14 +26,14 @@ REQUIRED_TIMER_NAMES = [
     "selective_forward",
 ]
 
-SPEEDUP = 5
-COND_SPEEDUP = 5
-WARMUP_STEPS = 9
+SPEEDUP = 4
+COND_SPEEDUP = 12
+WARMUP_STEPS = 8
 COOLDOWN_STEPS = 1
 
 TAG = f"cubic_w{WARMUP_STEPS}_s{SPEEDUP}_cs{COND_SPEEDUP}"
 
-visualize_curvature = True  # 是否启用曲率可视化（会增加额外计算开销）
+visualize_curvature = False # 是否启用曲率可视化（会增加额外计算开销）
 quality_eval = True
 
 
@@ -75,10 +71,10 @@ def _init_logging() -> None:
 def parse_args() -> argparse.Namespace:
     parser = argparse.ArgumentParser(description="FireRed Cubic monitor-only inference script")
     parser.add_argument("--model_path", type=str, default=None)
-    parser.add_argument("--input_image", type=Path, nargs="+", default=[Path(IMAGE_PATH)])
+    parser.add_argument("--input_image", type=Path, nargs="+", default=None)
     parser.add_argument("--output_image", type=Path, default=None)
     parser.add_argument("--output_dir", type=Path, default=None)
-    parser.add_argument("--prompt", type=str, default=PROMPT)
+    parser.add_argument("--prompt", type=str, default=None)
     parser.add_argument("--seed", type=int, default=49)
     parser.add_argument("--true_cfg_scale", type=float, default=4.0)
     parser.add_argument("--num_inference_steps", type=int, default=40)
@@ -117,8 +113,7 @@ def _resolve_output_paths(
 ) -> tuple[Path, Path, str]:
     model_id = Path(model_path).name
     prompt_id = get_prompt_id(prompt)
-    speed_tag = f"{target_speedup:g}x"
-    resolved_dir = output_dir or Path("results") / "firered" / model_id / TAG / f"{prompt_id}_{speed_tag}"
+    resolved_dir = output_dir or Path("results") / model_id / TAG / f"{prompt_id}"
     resolved_name = f"{TAG}_{prompt_id}_{model_id}.png"
     resolved_image = output_image or (resolved_dir / resolved_name)
     return resolved_dir, resolved_image, model_id
@@ -129,6 +124,8 @@ def main() -> None:
     init_timer()
     args = parse_args()
     args.model_path = resolve_model_path(args.model_path, "--model_path")
+    args.prompt = resolve_required_arg(args.prompt, "--prompt", "editing prompt")
+    args.input_image = resolve_required_arg(args.input_image, "--input_image", "input image path(s)")
     if args.cubic_warmup_fraction is not None:
         args.cubic_warmup_steps = max(0, int(args.num_inference_steps * args.cubic_warmup_fraction))
     if args.cubic_cooldown_fraction is not None:

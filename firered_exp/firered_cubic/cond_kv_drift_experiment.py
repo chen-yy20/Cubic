@@ -25,11 +25,9 @@ for extra_path in (REPO_ROOT, FIRERED_EXP_ROOT):
 
 from firered.pipeline import QwenImageEditPlusPipeline
 from firered.transformer import QwenImageTransformer2DModel, apply_rotary_emb_qwen
+from utils.launch_defaults import resolve_model_path, resolve_required_arg
 from utils.results import get_prompt_id
 
-MODEL_PATH = "/home/chenyy/WORK/models/firered-image-edit"
-IMAGE_PATH = "/home/chenyy/WORK/cyy/cubic/firered_exp/examples/cola.png"
-PROMPT = "Transform the object into a realistic miniature product by carefully holding it between your thumb and forefinger."
 TAG = "cond_kv_drift"
 
 logger = logging.getLogger(__name__)
@@ -285,9 +283,9 @@ class KVProbeQwenDoubleStreamAttnProcessor:
 
 def parse_args() -> argparse.Namespace:
     parser = argparse.ArgumentParser(description="Probe FireRed origin cond-image KV drift across timesteps.")
-    parser.add_argument("--model_path", type=str, default=MODEL_PATH)
-    parser.add_argument("--input_image", type=Path, nargs="+", default=[Path(IMAGE_PATH)])
-    parser.add_argument("--prompt", type=str, default=PROMPT)
+    parser.add_argument("--model_path", type=str, default=None)
+    parser.add_argument("--input_image", type=Path, nargs="+", default=None)
+    parser.add_argument("--prompt", type=str, default=None)
     parser.add_argument("--seed", type=int, default=49)
     parser.add_argument("--true_cfg_scale", type=float, default=4.0)
     parser.add_argument("--num_inference_steps", type=int, default=40)
@@ -542,12 +540,15 @@ def export_plot(output_dir: Path, records: list[LayerDriftRecord], sampled_layer
 def resolve_output_dir(model_path: str, prompt: str, output_dir: Path | None) -> Path:
     model_id = Path(model_path).name
     prompt_id = get_prompt_id(prompt)
-    return output_dir or Path("results") / "firered" / model_id / TAG / prompt_id
+    return output_dir or Path("results") / model_id / TAG / prompt_id
 
 
 def main() -> None:
     _init_logging()
     args = parse_args()
+    args.model_path = resolve_model_path(args.model_path, "--model_path")
+    args.prompt = resolve_required_arg(args.prompt, "--prompt", "editing prompt")
+    args.input_image = resolve_required_arg(args.input_image, "--input_image", "input image path(s)")
 
     if not torch.cuda.is_available():
         raise RuntimeError("CUDA is required for this FireRed KV drift experiment.")

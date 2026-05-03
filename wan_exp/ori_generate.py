@@ -37,9 +37,9 @@ def _resolve_model_defaults(model_path):
     return "t2v-14B", "1280*720", "14B"
 
 
-def _default_output_dir(model_path):
+def _default_output_dir(model_path, prompt):
     _, _, model_id = _resolve_model_defaults(model_path)
-    return f"./results/wan/{model_id}/ori/{get_prompt_id(PROMPT)}"
+    return f"./results/wan/{model_id}/ori/{get_prompt_id(prompt)}"
 
 # 2卡并行初始化（CFG parallel）
 rank = int(os.getenv("RANK", 0))
@@ -198,9 +198,10 @@ def _parse_args():
     args = parser.parse_args()
     args.ckpt_dir = resolve_model_path(args.ckpt_dir, "--ckpt_dir")
     args.task, args.size, _ = _resolve_model_defaults(args.ckpt_dir)
-    args.prompt = PROMPT
+    if args.prompt is None:
+        args.prompt = PROMPT
     if args.output_dir is None:
-        args.output_dir = _default_output_dir(args.ckpt_dir)
+        args.output_dir = _default_output_dir(args.ckpt_dir, args.prompt)
     args.base_seed = 42 if args.base_seed < 0 else args.base_seed
 
     _validate_args(args)
@@ -276,7 +277,7 @@ def generate(args):
     )
 
     if rank == 0:
-        filename = f"{TAG}_{get_prompt_id(PROMPT)}_{args.task}.mp4"
+        filename = f"{TAG}_{get_prompt_id(args.prompt)}_{args.task}.mp4"
         os.makedirs(args.output_dir, exist_ok=True)
         args.save_file = os.path.join(args.output_dir, filename)
 
@@ -306,7 +307,7 @@ if __name__ == "__main__":
             "method": "ori",
             "model_id": model_id,
             "model_path": args.ckpt_dir,
-            "prompt": PROMPT,
+            "prompt": args.prompt,
             "task": args.task,
             "size": args.size,
             "base_seed": args.base_seed,

@@ -17,7 +17,8 @@ PROMPT = "A photorealistic cute cat, wearing a simple blue shirt, standing again
 NUM_INFERENCE_STEPS = 50
 GUIDANCE_SCALE = 3.5
 NUM_IMAGES = 3
-SEEDS = [42 + i for i in range(NUM_IMAGES)]
+BASE_SEED = 42
+WARMUP_RUNS = 0
 
 SPEEDUP = 5
 WARMUP_STEPS = 9
@@ -73,6 +74,30 @@ def _print_step_latency_trace(step_trace, seed=None):
 def parse_args() -> argparse.Namespace:
     parser = argparse.ArgumentParser(description="Flux cubic inference script")
     parser.add_argument("--model_path", type=str, default=None, help="Model path or HuggingFace model ID")
+    parser.add_argument("--prompt", type=str, default=PROMPT, help="Generation prompt")
+    parser.add_argument("--height", type=int, default=HEIGHT, help="Output image height")
+    parser.add_argument("--width", type=int, default=WIDTH, help="Output image width")
+    parser.add_argument("--num_inference_steps", type=int, default=NUM_INFERENCE_STEPS, help="Inference steps")
+    parser.add_argument("--guidance_scale", type=float, default=GUIDANCE_SCALE, help="Guidance scale")
+    parser.add_argument("--seed", type=int, default=BASE_SEED, help="Base random seed")
+    parser.add_argument("--num_images", type=int, default=NUM_IMAGES, help="Number of images/seeds to generate")
+    parser.add_argument("--warmup_runs", type=int, default=WARMUP_RUNS, help="Warmup runs before timed generation")
+    parser.add_argument("--output_dir", type=str, default=None, help="Output directory override")
+    parser.add_argument("--cubic_target_speedup", type=float, default=SPEEDUP, help="Target cubic speedup")
+    parser.add_argument("--cubic_warmup_steps", type=int, default=WARMUP_STEPS, help="Warmup steps")
+    parser.add_argument("--cubic_cooldown_steps", type=int, default=COOLDOWN_STEPS, help="Cooldown steps")
+    parser.add_argument(
+        "--disable_visualization",
+        action="store_true",
+        default=not curvature_visualize,
+        help="Disable curvature visualization export",
+    )
+    parser.add_argument(
+        "--disable_quality_eval",
+        action="store_true",
+        default=not quality_eval,
+        help="Disable quality evaluation against ori baseline",
+    )
     return parser.parse_args()
 
 
@@ -89,7 +114,10 @@ def main() -> None:
     args = parse_args()
     model_path = resolve_model_path(args.model_path, "--model_path")
     model_id = os.path.basename(model_path.rstrip("/"))
-    output_dir = f"./results/flux/{TAG}/{get_prompt_id(PROMPT)}_{SPEEDUP}x"
+    tag = f"cubic_w{args.cubic_warmup_steps}_s{args.cubic_target_speedup:g}"
+    prompt_id = get_prompt_id(args.prompt)
+    output_dir = args.output_dir or f"./results/flux/{tag}/{prompt_id}_{args.cubic_target_speedup:g}x"
+    seeds = [args.seed + i for i in range(max(1, int(args.num_images)))]
 
     init_timer()
     os.makedirs(output_dir, exist_ok=True)
@@ -100,35 +128,54 @@ def main() -> None:
     per_seed_quality: dict[str, dict] = {}
     per_seed_step_trace: dict[str, list[dict]] = {}
 
-    for seed in SEEDS:
+    for warmup_idx in range(max(0, int(args.warmup_runs))):
+        warmup_generator = torch.Generator("cuda").manual_seed(seeds[0] + warmup_idx)
+        with torch.inference_mode():
+            pipe(
+                prompt=args.prompt,
+                height=args.height,
+                width=args.width,
+                guidance_scale=args.guidance_scale,
+                num_inference_steps=args.num_inference_steps,
+                max_sequence_length=512,
+                generator=warmup_generator,
+                cubic_warmup_steps=args.cubic_warmup_steps,
+                cubic_cooldown_steps=args.cubic_cooldown_steps,
+                cubic_target_speedup=args.cubic_target_speedup,
+                cubic_enable_visualization=not args.disable_visualization,
+                cubic_results_dir=output_dir,
+                cubic_visual_tag=f"warmup{warmup_idx}",
+            )
+
+    for seed in seeds:
         generator = torch.Generator("cuda").manual_seed(seed)
         with torch.inference_mode():
             image = pipe(
-                prompt=PROMPT,
-                height=HEIGHT,
-                width=WIDTH,
-                guidance_scale=GUIDANCE_SCALE,
-                num_inference_steps=NUM_INFERENCE_STEPS,
+                prompt=args.prompt,
+                height=args.height,
+                width=args.width,
+                guidance_scale=args.guidance_scale,
+                num_inference_steps=args.num_inference_steps,
                 max_sequence_length=512,
                 generator=generator,
-                cubic_warmup_steps=WARMUP_STEPS,
-                cubic_cooldown_steps=COOLDOWN_STEPS,
-                cubic_target_speedup=SPEEDUP,
-                cubic_enable_visualization=curvature_visualize,
+                cubic_warmup_steps=args.cubic_warmup_steps,
+                cubic_cooldown_steps=args.cubic_cooldown_steps,
+                cubic_target_speedup=args.cubic_target_speedup,
+                cubic_enable_visualization=not args.disable_visualization,
                 cubic_results_dir=output_dir,
                 cubic_visual_tag=f"seed{seed}",
             ).images[0]
         step_trace = pipe.get_step_trace()
         per_seed_step_trace[f"seed{seed}"] = step_trace
         _print_step_latency_trace(step_trace, seed=seed)
-        output_path = os.path.join(output_dir, f"{TAG}_{get_prompt_id(PROMPT)}_seed{seed}.png")
+        output_path = os.path.join(output_dir, f"{tag}_{prompt_id}_seed{seed}.png")
         image.save(output_path)
         print(f"Stored {output_path}!", flush=True)
 
-        if quality_eval:
+        if not args.disable_quality_eval:
             quality_result = evaluate_quality_with_origin(
                 image_path=output_path,
-                tag=TAG,
+                tag=tag,
                 save_metrics=False,
                 baseline_path=None,
                 output_dir=output_dir,
@@ -136,7 +183,7 @@ def main() -> None:
             per_seed_quality[f"seed{seed}"] = quality_result["metrics"] if quality_result is not None else {}
 
     quality_metrics = None
-    if quality_eval:
+    if not args.disable_quality_eval:
         valid_metrics = [m for m in per_seed_quality.values() if m]
         if valid_metrics:
             metric_names = ["psnr", "ssim", "lpips", "fid", "fvd"]
@@ -162,27 +209,29 @@ def main() -> None:
     first_step_trace = next(iter(per_seed_step_trace.values()), [])
     params = {
         "model": "flux",
-        "method": TAG,
+        "method": tag,
         "model_id": model_id,
         "model_path": model_path,
-        "prompt": PROMPT,
-        "height": HEIGHT,
-        "width": WIDTH,
-        "num_images": NUM_IMAGES,
-        "num_inference_steps": NUM_INFERENCE_STEPS,
-        "guidance_scale": GUIDANCE_SCALE,
-        "seeds": SEEDS,
-        "target_speedup": SPEEDUP,
-        "warmup_steps": WARMUP_STEPS,
-        "cooldown_steps": COOLDOWN_STEPS,
+        "prompt": args.prompt,
+        "height": args.height,
+        "width": args.width,
+        "num_images": len(seeds),
+        "num_inference_steps": args.num_inference_steps,
+        "guidance_scale": args.guidance_scale,
+        "seeds": seeds,
+        "target_speedup": args.cubic_target_speedup,
+        "warmup_steps": args.cubic_warmup_steps,
+        "cooldown_steps": args.cubic_cooldown_steps,
         "dynamic_anchor": "2x_tau_max",
         "partition_mode": "uniform",
         "uniform_common_factor_blocks": True,
-        "quality_eval": quality_eval,
+        "quality_eval": not args.disable_quality_eval,
+        "visualization_enabled": not args.disable_visualization,
+        "warmup_runs": max(0, int(args.warmup_runs)),
     }
     params_path = save_params_and_metrics(
         output_dir,
-        TAG,
+        tag,
         params,
         get_time_statistics_dict(timer_names=REQUIRED_TIMER_NAMES),
         quality_metrics=_merge_quality_and_step_metrics(

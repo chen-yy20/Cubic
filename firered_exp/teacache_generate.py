@@ -14,19 +14,12 @@ import baseline.teacache_firered  # noqa: F401 — monkey patch FireRed Transfor
 from firered.pipeline import QwenImageEditPlusPipeline
 from firered.transformer import QwenImageTransformer2DModel
 
-from utils.launch_defaults import resolve_model_path
+from utils.launch_defaults import resolve_model_path, resolve_required_arg
 from utils.quality_metric import evaluate_quality_with_origin
 from utils.results import get_prompt_id, save_params_and_metrics
 from utils.timer import get_time_statistics_dict, init_timer, print_time_statistics, save_time_stats_to_file
 
-# IMAGE_PATH = "/home/fit/zhaijdcyy/WORK/Cubic/firered_exp/examples/cola.png"
-IMAGE_PATH = "/home/chenyy/WORK/cyy/cubic/firered_exp/examples/cola.png"
 thresh = 0.2  # TeaCache 累积阈值；越大跳过越多、越快，画质风险越高（常见 0.4~0.7）
-
-PROMPT = (
-    "Transform the object into a realistic miniature product by carefully holding it "
-    "between your thumb and forefinger."
-)
 TAG = f"teacache_{thresh}"
 REQUIRED_TIMER_NAMES = [
     "generate_e2e",
@@ -77,10 +70,10 @@ def _init_logging() -> None:
 def parse_args() -> argparse.Namespace:
     parser = argparse.ArgumentParser(description="FireRed TeaCache inference script")
     parser.add_argument("--model_path", type=str, default=None)
-    parser.add_argument("--input_image", type=Path, nargs="+", default=[Path(IMAGE_PATH)])
+    parser.add_argument("--input_image", type=Path, nargs="+", default=None)
     parser.add_argument("--output_image", type=Path, default=None)
     parser.add_argument("--output_dir", type=Path, default=None)
-    parser.add_argument("--prompt", type=str, default=PROMPT)
+    parser.add_argument("--prompt", type=str, default=None)
     parser.add_argument("--seed", type=int, default=49, help="与 ori/cubic 默认一致，便于质量对比")
     parser.add_argument("--true_cfg_scale", type=float, default=4.0)
     parser.add_argument("--num_inference_steps", type=int, default=40)
@@ -129,7 +122,7 @@ def _resolve_output_paths(
     """与 ori/cubic 一致：`{tag}_{prompt_id}_{model_id}.png`，便于 quality_metric 替换为 ori_ 基准。"""
     model_id = Path(model_path).name
     prompt_id = get_prompt_id(prompt)
-    resolved_dir = output_dir or Path("results") / "firered" / model_id / TAG / prompt_id
+    resolved_dir = output_dir or Path("results") / model_id / TAG / prompt_id
     resolved_name = f"{TAG}_{prompt_id}_{model_id}.png"
     resolved_image = output_image or (resolved_dir / resolved_name)
     return resolved_dir, resolved_image, model_id
@@ -140,6 +133,8 @@ def main() -> None:
     init_timer()
     args = parse_args()
     args.model_path = resolve_model_path(args.model_path, "--model_path")
+    args.prompt = resolve_required_arg(args.prompt, "--prompt", "editing prompt")
+    args.input_image = resolve_required_arg(args.input_image, "--input_image", "input image path(s)")
     output_dir, output_image_path, model_id = _resolve_output_paths(
         args.model_path,
         args.prompt,

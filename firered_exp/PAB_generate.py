@@ -14,19 +14,11 @@ import baseline.PAB_firered  # noqa: F401 — monkey patch FireRed Transformer
 from firered.pipeline import QwenImageEditPlusPipeline
 from firered.transformer import QwenImageTransformer2DModel
 
-from utils.launch_defaults import resolve_model_path
+from utils.launch_defaults import resolve_model_path, resolve_required_arg
 from utils.quality_metric import evaluate_quality_with_origin
 from utils.results import get_prompt_id, save_params_and_metrics
 from utils.timer import get_time_statistics_dict, init_timer, print_time_statistics, save_time_stats_to_file
 
-IMAGE_PATH = "/home/fit/zhaijdcyy/WORK/Cubic/firered_exp/examples/cola.png"
-IMAGE_PATH = "/home/chenyy/WORK/cyy/cubic/firered_exp/examples/cola.png"
-
-PROMPT = (
-    "Transform the object into a realistic miniature product by carefully holding it "
-    "between your thumb and forefinger."
-)
-TAG = "pab"
 REQUIRED_TIMER_NAMES = [
     "generate_e2e",
     "dit_forward",
@@ -35,9 +27,11 @@ REQUIRED_TIMER_NAMES = [
 # PAB 默认超参
 PAB_WARMUP_STEPS = 5
 PAB_COOLDOWN_STEPS_OFFSET = 5   # 从末尾往前保留几步做全量计算
-PAB_SKIP_RANGE = 4               # attention 复用间隔（每隔几步重算一次）
+PAB_SKIP_RANGE = 16               # attention 复用间隔（每隔几步重算一次）
 
 quality_eval = True
+
+TAG = f"pab_{PAB_SKIP_RANGE}"
 
 
 def _init_logging() -> None:
@@ -52,10 +46,10 @@ def _init_logging() -> None:
 def parse_args() -> argparse.Namespace:
     parser = argparse.ArgumentParser(description="FireRed PAB inference script")
     parser.add_argument("--model_path", type=str, default=None)
-    parser.add_argument("--input_image", type=Path, nargs="+", default=[Path(IMAGE_PATH)])
+    parser.add_argument("--input_image", type=Path, nargs="+", default=None)
     parser.add_argument("--output_image", type=Path, default=None)
     parser.add_argument("--output_dir", type=Path, default=None)
-    parser.add_argument("--prompt", type=str, default=PROMPT)
+    parser.add_argument("--prompt", type=str, default=None)
     parser.add_argument("--seed", type=int, default=49, help="与 ori/teacache/cubic 默认一致，便于质量对比")
     parser.add_argument("--true_cfg_scale", type=float, default=4.0)
     parser.add_argument("--num_inference_steps", type=int, default=40)
@@ -118,7 +112,7 @@ def _resolve_output_paths(
     model_id = Path(model_path).name
     prompt_id = get_prompt_id(prompt)
     speed_tag = f"skip{skip_range}"
-    resolved_dir = output_dir or Path("results") / "firered" / model_id / TAG / f"{prompt_id}_{speed_tag}"
+    resolved_dir = output_dir or Path("results") / model_id / TAG / f"{prompt_id}_{speed_tag}"
     resolved_name = f"{TAG}_{prompt_id}_{model_id}.png"
     resolved_image = output_image or (resolved_dir / resolved_name)
     return resolved_dir, resolved_image, model_id
@@ -129,6 +123,8 @@ def main() -> None:
     init_timer()
     args = parse_args()
     args.model_path = resolve_model_path(args.model_path, "--model_path")
+    args.prompt = resolve_required_arg(args.prompt, "--prompt", "editing prompt")
+    args.input_image = resolve_required_arg(args.input_image, "--input_image", "input image path(s)")
 
     pab_cooldown_steps = args.num_inference_steps - args.pab_cooldown_steps_offset
 

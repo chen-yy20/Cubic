@@ -38,19 +38,11 @@ import baseline.jano_firered  # noqa: F401
 from firered.pipeline import QwenImageEditPlusPipeline
 from firered.transformer import QwenImageTransformer2DModel
 
-from utils.launch_defaults import resolve_model_path
+from utils.launch_defaults import resolve_model_path, resolve_required_arg
 from utils.quality_metric import evaluate_quality_with_origin
 from utils.results import get_prompt_id, save_params_and_metrics
 from utils.timer import get_time_statistics_dict, get_timer, init_timer, print_time_statistics
 
-# ── 默认配置 ──────────────────────────────────────────────────────────────────
-IMAGE_PATH = "/home/fit/zhaijdcyy/WORK/Cubic/firered_exp/examples/cola.png"
-IMAGE_PATH = "/home/chenyy/WORK/cyy/cubic/firered_exp/examples/cola.png"
-
-PROMPT = (
-    "Transform the object into a realistic miniature product by carefully holding it "
-    "between your thumb and forefinger."
-)
 TAG = "jano"
 
 # Jano 超参（与 Jano WAN 默认配置对齐）
@@ -82,10 +74,10 @@ def _init_logging() -> None:
 def parse_args() -> argparse.Namespace:
     parser = argparse.ArgumentParser(description="FireRed Jano inference script")
     parser.add_argument("--model_path",  type=str,  default=None)
-    parser.add_argument("--input_image", type=Path, nargs="+", default=[Path(IMAGE_PATH)])
+    parser.add_argument("--input_image", type=Path, nargs="+", default=None)
     parser.add_argument("--output_image", type=Path, default=None)
     parser.add_argument("--output_dir",   type=Path, default=None)
-    parser.add_argument("--prompt",       type=str,  default=PROMPT)
+    parser.add_argument("--prompt",       type=str,  default=None)
     parser.add_argument("--seed",         type=int,  default=49)
     parser.add_argument("--true_cfg_scale", type=float, default=4.0)
     parser.add_argument("--num_inference_steps", type=int, default=40)
@@ -150,7 +142,7 @@ def _resolve_output_paths(
     speed_tag  = f"si{static_interval}_mi{medium_interval}"
     resolved_dir = (
         output_dir
-        or Path("results") / "firered" / model_id / TAG / f"{prompt_id}_{speed_tag}"
+        or Path("results") / model_id / TAG / f"{prompt_id}_{speed_tag}"
     )
     resolved_name  = f"{TAG}_{prompt_id}_{model_id}.png"
     resolved_image = output_image or (resolved_dir / resolved_name)
@@ -164,6 +156,8 @@ def main() -> None:
     init_timer()
     args = parse_args()
     args.model_path = resolve_model_path(args.model_path, "--model_path")
+    args.prompt = resolve_required_arg(args.prompt, "--prompt", "editing prompt")
+    args.input_image = resolve_required_arg(args.input_image, "--input_image", "input image path(s)")
 
     # 开始 generate_e2e 计时（覆盖整个生成流程）
     timer_context = get_timer("generate_e2e")

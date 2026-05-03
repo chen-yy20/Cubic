@@ -59,9 +59,9 @@ def _resolve_model_defaults(model_path):
     return 't2v-14B', '1280*720', '14B'
 
 
-def _default_output_dir(model_path):
+def _default_output_dir(model_path, prompt):
     _, _, model_id = _resolve_model_defaults(model_path)
-    return f'./results/wan/{model_id}/pab/{get_prompt_id(PROMPT)}'
+    return f'./results/wan/{model_id}/pab/{get_prompt_id(prompt)}'
 
 EXAMPLE_PROMPT = {
     "t2v-1.3B": {
@@ -776,7 +776,7 @@ def _parse_args():
     if args.prompt is None:
         args.prompt = PROMPT
     if args.output_dir is None:
-        args.output_dir = _default_output_dir(args.ckpt_dir)
+        args.output_dir = _default_output_dir(args.ckpt_dir, args.prompt)
     args.base_seed = 42 if args.base_seed < 0 else args.base_seed
 
     _validate_args(args)
@@ -1041,7 +1041,7 @@ if __name__ == "__main__":
             'method': 'pab',
             'model_id': model_id,
             'model_path': args.ckpt_dir,
-            'prompt': PROMPT,
+            'prompt': args.prompt,
             'task': args.task,
             'size': args.size,
             'base_seed': args.base_seed,

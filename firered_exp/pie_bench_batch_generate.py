@@ -350,7 +350,7 @@ def main() -> None:
 
     model_id = Path(args.model_path).name
     out_root = args.output_root or (
-        Path("results") / "firered" / model_id / "pie_bench"
+        Path("results") / model_id / "pie_bench"
     )
     out_root = out_root.resolve()
     out_root.mkdir(parents=True, exist_ok=True)

@@ -10,14 +10,10 @@ from PIL import Image
 from firered.pipeline import QwenImageEditPlusPipeline
 from firered.transformer import QwenImageTransformer2DModel
 
-from utils.launch_defaults import resolve_model_path
+from utils.launch_defaults import resolve_model_path, resolve_required_arg
 from utils.results import get_prompt_id, save_params_and_metrics
 from utils.timer import get_time_statistics_dict, init_timer, print_time_statistics, save_time_stats_to_file
 
-IMAGE_PATH = "/home/fit/zhaijdcyy/WORK/Cubic/firered_exp/examples/cola.png"
-IMAGE_PATH = "/home/chenyy/WORK/cyy/cubic/firered_exp/examples/cola.png"
-
-PROMPT = "Transform the object into a realistic miniature product by carefully holding it between your thumb and forefinger."
 TAG = "ori"
 REQUIRED_TIMER_NAMES = [
     "generate_e2e",
@@ -42,7 +38,7 @@ def parse_args() -> argparse.Namespace:
         "--input_image",
         type=Path,
         nargs="+",
-        default=[Path(IMAGE_PATH)],
+        default=None,
         help="Path(s) to the input image(s). Supports 1-N images. "
              "When more than 3 images are given the agent will "
              "automatically crop and stitch them into 2-3 composites.",
@@ -62,7 +58,7 @@ def parse_args() -> argparse.Namespace:
     parser.add_argument(
         "--prompt",
         type=str,
-        default=PROMPT,
+        default=None,
         help="Editing prompt",
     )
     parser.add_argument(
@@ -120,7 +116,7 @@ def load_pipeline(model_path: str) -> QwenImageEditPlusPipeline:
 def _resolve_output_paths(model_path: str, prompt: str, output_dir: Path | None, output_image: Path | None) -> tuple[Path, Path, str]:
     model_id = Path(model_path).name
     prompt_id = get_prompt_id(prompt)
-    resolved_dir = output_dir or Path("results") / "firered" / model_id / TAG / prompt_id
+    resolved_dir = output_dir or Path("results") / model_id / TAG / prompt_id
     resolved_name = f"{TAG}_{prompt_id}_{model_id}.png"
     resolved_image = output_image or (resolved_dir / resolved_name)
     return resolved_dir, resolved_image, model_id
@@ -131,6 +127,8 @@ def main() -> None:
     """Main entry point."""
     args = parse_args()
     args.model_path = resolve_model_path(args.model_path, "--model_path")
+    args.prompt = resolve_required_arg(args.prompt, "--prompt", "editing prompt")
+    args.input_image = resolve_required_arg(args.input_image, "--input_image", "input image path(s)")
     output_dir, output_image_path, model_id = _resolve_output_paths(
         args.model_path, args.prompt, args.output_dir, args.output_image
     )

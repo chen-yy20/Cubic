@@ -24,14 +24,16 @@ from firered.pipeline import (
 )
 from cubic_core import (
     AdaptivePartitioner,
+    Block,
     CubicVisualizer,
+    FrequencyPlan,
     CurvatureMonitor,
     Phase,
+    Partition,
     SelectiveStepScheduler,
     UpdateFrequencyOptimizer,
 )
 from utils.timer import get_timer
-from firered_cubic.condition_monitor import ConditionComplexityMonitor
 from firered_cubic.cubic_selective_forward import FireRedSelectiveForwardEngine
 from firered_cubic.transformer import CubicQwenImageTransformer2DModel
 
@@ -79,8 +81,6 @@ class CubicQwenImageEditPlusPipeline(QwenImageEditPlusPipeline):
         self.cond_target_speedup = 2.0
         self.alpha = 2.0
         self.beta = 4.0
-        self.tau_min = 1
-        self.tau_max = 10
 
         self.patch_size = (1, 2, 2)
         self.curvature_percentile = 0.9
@@ -98,11 +98,9 @@ class CubicQwenImageEditPlusPipeline(QwenImageEditPlusPipeline):
         self.partition_mode = "uniform" # morphology/uniform
 
         self.monitor = CurvatureMonitor(self)
-        self.condition_monitor = ConditionComplexityMonitor(self)
         self.visualizer = CubicVisualizer(self)
         self.partitioner = AdaptivePartitioner(self)
         self.main_frequency_optimizer = UpdateFrequencyOptimizer(self)
-        self.cond_frequency_optimizer = UpdateFrequencyOptimizer(self)
         self.step_scheduler = SelectiveStepScheduler(self)
         self.selective_engine = FireRedSelectiveForwardEngine(self)
         self.current_partition = None
@@ -166,20 +164,9 @@ class CubicQwenImageEditPlusPipeline(QwenImageEditPlusPipeline):
         self.main_frequency_optimizer.target_speedup = float(self.target_speedup)
         self.main_frequency_optimizer.alpha = float(self.alpha)
         self.main_frequency_optimizer.beta = float(self.beta)
-        self.main_frequency_optimizer.tau_min = int(self.tau_min)
-        self.main_frequency_optimizer.tau_max = int(self.tau_max)
         self.main_frequency_optimizer.curvature_contrast_gamma = float(self.curvature_contrast_gamma)
         self.main_frequency_optimizer.tau_diversity_target_span = float(self.tau_diversity_target_span)
         self.main_frequency_optimizer.tau_diversity_max_boost = float(self.tau_diversity_max_boost)
-
-        self.cond_frequency_optimizer.target_speedup = float(self.cond_target_speedup)
-        self.cond_frequency_optimizer.alpha = float(self.alpha)
-        self.cond_frequency_optimizer.beta = float(self.beta)
-        self.cond_frequency_optimizer.tau_min = int(self.tau_min)
-        self.cond_frequency_optimizer.tau_max = int(self.tau_max)
-        self.cond_frequency_optimizer.curvature_contrast_gamma = float(self.curvature_contrast_gamma)
-        self.cond_frequency_optimizer.tau_diversity_target_span = float(self.tau_diversity_target_span)
-        self.cond_frequency_optimizer.tau_diversity_max_boost = float(self.tau_diversity_max_boost)
 
     @staticmethod
     def _phase_to_enum(phase_name: str) -> Phase:
@@ -244,7 +231,6 @@ class CubicQwenImageEditPlusPipeline(QwenImageEditPlusPipeline):
 
         self._sync_cubic_modules_config()
         self.monitor.reset()
-        self.condition_monitor.reset()
         self.selective_engine.reset()
         self.current_partition = None
         self.current_frequency_plan = None
@@ -406,36 +392,37 @@ class CubicQwenImageEditPlusPipeline(QwenImageEditPlusPipeline):
                     f"Condition token count {cond_token_count} exceeds image_latents sequence length {int(image_latents.shape[1])}."
                 )
 
-            cond_tokens = image_latents[:, :cond_token_count, :]
-            cond_unpacked = self._unpack_token_segment(
-                cond_tokens,
-                token_h=int(cond_shape[1]),
-                token_w=int(cond_shape[2]),
-            )
-            cond_complexity_map = self.condition_monitor.build_from_condition_latents(
-                cond_unpacked,
-                step_idx=0,
-            )
-
-            ft, ht, wt = cond_complexity_map.shape
-            cond_partition = self.partitioner.partition(
+            ft, ht, wt = int(cond_shape[0]), int(cond_shape[1]), int(cond_shape[2])
+            cond_interval = max(1, int(round(float(self.cond_target_speedup))))
+            cond_partition = Partition(
+                blocks=[
+                    Block(
+                        block_id=0,
+                        f_start=0,
+                        f_end=ft,
+                        h_start=0,
+                        h_end=ht,
+                        w_start=0,
+                        w_end=wt,
+                    )
+                ],
                 Ft=ft,
                 Ht=ht,
                 Wt=wt,
-                curvature_map=cond_complexity_map,
+                selected_block_size=(ft, ht, wt),
+                is_uniform=True,
+                partition_mode="single_block",
             )
-            cond_partition_debug = self.partitioner.describe_partition(
-                cond_partition,
-                curvature_map=cond_complexity_map,
-            )
-            cond_block_curvatures = self.condition_monitor.get_block_curvatures(
-                cond_partition,
-                complexity_map=cond_complexity_map,
-            )
-
-            cond_frequency_plan = self.cond_frequency_optimizer.optimize(
-                partition=cond_partition,
-                block_curvatures=cond_block_curvatures,
+            cond_frequency_plan = FrequencyPlan(
+                block_intervals={0: cond_interval},
+                mean_interval=float(cond_interval),
+                mean_update_rate=float(1.0 / cond_interval),
+                achieved_speedup=float(cond_interval),
+                min_interval=cond_interval,
+                max_interval=cond_interval,
+                block_mean_interval=float(cond_interval),
+                block_mean_update_rate=float(1.0 / cond_interval),
+                block_achieved_speedup=float(cond_interval),
             )
             self.current_cond_partition = cond_partition
             self.current_cond_frequency_plan = cond_frequency_plan
@@ -448,20 +435,15 @@ class CubicQwenImageEditPlusPipeline(QwenImageEditPlusPipeline):
             )
 
             logger.info(
-                "[firered-cond-complexity] token_grid=(%d,%d,%d) chosen_block_size=%s blocks=%d mean=%.6e min=%.6e max=%.6e",
-                cond_complexity_map.shape[0],
-                cond_complexity_map.shape[1],
-                cond_complexity_map.shape[2],
-                cond_partition_debug.chosen_block_size,
-                cond_partition_debug.block_count,
-                float(cond_complexity_map.float().mean().item()),
-                float(cond_complexity_map.float().amin().item()),
-                float(cond_complexity_map.float().amax().item()),
+                "[firered-cond-schedule] token_grid=(%d,%d,%d) mode=full_compute_or_reuse interval=%d blocks=%d",
+                ft,
+                ht,
+                wt,
+                cond_interval,
+                len(cond_partition.blocks),
             )
             logger.info(
-                "[firered-cond-optimizer] config_tau(min=%d max=%d) assigned_tau(min=%d max=%d mean=%.3f) mean_update_rate=%.6f achieved_speedup=%.3f histogram=%s",
-                int(getattr(self.cond_frequency_optimizer, "tau_min", 1)),
-                int(getattr(self.cond_frequency_optimizer, "tau_max", 10)),
+                "[firered-cond-optimizer] assigned_tau(min=%d max=%d mean=%.3f) mean_update_rate=%.6f achieved_speedup=%.3f histogram=%s",
                 cond_frequency_plan.min_interval,
                 cond_frequency_plan.max_interval,
                 cond_frequency_plan.mean_interval,
@@ -469,17 +451,6 @@ class CubicQwenImageEditPlusPipeline(QwenImageEditPlusPipeline):
                 cond_frequency_plan.achieved_speedup,
                 self._format_interval_histogram(cond_frequency_plan.block_intervals),
             )
-
-            if cubic_enable_visualization and cubic_results_dir:
-                self.visualizer.visualize_partition_and_frequency(
-                    partition=cond_partition,
-                    curvature_map=cond_complexity_map,
-                    block_curvatures=cond_block_curvatures,
-                    block_intervals=cond_frequency_plan.block_intervals,
-                    step_idx=0,
-                    output_dir=cubic_results_dir,
-                    file_suffix=f"{cubic_visual_tag}_cond_complexity" if cubic_visual_tag else "cond_complexity",
-                )
 
         elif image_latents is not None:
             logger.info("[firered-cond-complexity] condition latents exist but no condition shape metadata found, skip cond scheduling.")
@@ -717,10 +688,8 @@ class CubicQwenImageEditPlusPipeline(QwenImageEditPlusPipeline):
                                     )
 
                                 logger.info(
-                                    "[firered-optimizer] step=%d config_tau(min=%d max=%d) assigned_tau(min=%d max=%d mean=%.3f) mean_update_rate=%.6f achieved_speedup=%.3f next_anchor_gap=%d next_anchor_step=%d histogram=%s",
+                                    "[firered-optimizer] step=%d assigned_tau(min=%d max=%d mean=%.3f) mean_update_rate=%.6f achieved_speedup=%.3f next_anchor_gap=%d next_anchor_step=%d histogram=%s",
                                     i,
-                                    int(getattr(self.main_frequency_optimizer, "tau_min", 1)),
-                                    int(getattr(self.main_frequency_optimizer, "tau_max", 10)),
                                     frequency_plan.min_interval,
                                     frequency_plan.max_interval,
                                     frequency_plan.mean_interval,
@@ -907,17 +876,6 @@ class CubicQwenImageEditPlusPipeline(QwenImageEditPlusPipeline):
                 len(self.monitor.curvature_history),
             )
 
-        if cubic_enable_visualization and cubic_results_dir and self.condition_monitor.complexity_history:
-            self.visualizer.export_curvature_history(
-                self.condition_monitor.complexity_history,
-                cubic_results_dir,
-                file_suffix=f"{cubic_visual_tag}_cond_complexity" if cubic_visual_tag else "cond_complexity",
-            )
-            logger.info(
-                "[firered-visual] cond complexity history exported to %s (records=%d)",
-                cubic_results_dir,
-                len(self.condition_monitor.complexity_history),
-            )
         self._log_step_selection_summary()
 
         if not return_dict:

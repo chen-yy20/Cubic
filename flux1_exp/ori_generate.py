@@ -22,12 +22,22 @@ NUM_INFERENCE_STEPS = 50
 GUIDANCE_SCALE = 3.5
 TAG = "ori"
 NUM_IMAGES = 3
-SEEDS = [42 + i for i in range(NUM_IMAGES)]
+BASE_SEED = 42
+WARMUP_RUNS = 1
 
 
 def parse_args() -> argparse.Namespace:
     parser = argparse.ArgumentParser(description="Flux inference script")
     parser.add_argument("--model_path", type=str, default=None, help="Model path or HuggingFace model ID")
+    parser.add_argument("--prompt", type=str, default=PROMPT, help="Generation prompt")
+    parser.add_argument("--height", type=int, default=HEIGHT, help="Output image height")
+    parser.add_argument("--width", type=int, default=WIDTH, help="Output image width")
+    parser.add_argument("--num_inference_steps", type=int, default=NUM_INFERENCE_STEPS, help="Inference steps")
+    parser.add_argument("--guidance_scale", type=float, default=GUIDANCE_SCALE, help="Guidance scale")
+    parser.add_argument("--seed", type=int, default=BASE_SEED, help="Base random seed")
+    parser.add_argument("--num_images", type=int, default=NUM_IMAGES, help="Number of images/seeds to generate")
+    parser.add_argument("--warmup_runs", type=int, default=WARMUP_RUNS, help="Warmup runs before timed generation")
+    parser.add_argument("--output_dir", type=str, default=None, help="Output directory override")
     return parser.parse_args()
 
 
@@ -44,43 +54,44 @@ def main() -> None:
     args = parse_args()
     model_path = resolve_model_path(args.model_path, "--model_path")
     model_id = os.path.basename(model_path.rstrip("/"))
-    output_dir = f"./results/flux/{TAG}/{get_prompt_id(PROMPT)}"
+    prompt_id = get_prompt_id(args.prompt)
+    output_dir = args.output_dir or f"./results/flux/{TAG}/{prompt_id}"
+    seeds = [args.seed + i for i in range(max(1, int(args.num_images)))]
 
     init_timer()
     os.makedirs(output_dir, exist_ok=True)
 
-    prompt = PROMPT
     pipe = load_pipeline(model_path)
     print(f"Model loaded, GPU memory allocated: {torch.cuda.memory_allocated()/1024**2:.2f}MB", flush=True)
 
     disable_timing()
-    warmup_generator = torch.Generator("cuda").manual_seed(SEEDS[0])
-    for _ in range(1):
+    warmup_generator = torch.Generator("cuda").manual_seed(seeds[0])
+    for _ in range(max(0, int(args.warmup_runs))):
         with torch.inference_mode():
             pipe(
-                prompt,
-                height=HEIGHT,
-                width=WIDTH,
-                guidance_scale=GUIDANCE_SCALE,
-                num_inference_steps=NUM_INFERENCE_STEPS,
+                args.prompt,
+                height=args.height,
+                width=args.width,
+                guidance_scale=args.guidance_scale,
+                num_inference_steps=args.num_inference_steps,
                 max_sequence_length=512,
                 generator=warmup_generator,
             )
 
     enable_timing()
-    for seed in SEEDS:
+    for seed in seeds:
         generator = torch.Generator("cuda").manual_seed(seed)
         with torch.inference_mode():
             image = pipe(
-                prompt,
-                height=HEIGHT,
-                width=WIDTH,
-                guidance_scale=GUIDANCE_SCALE,
-                num_inference_steps=NUM_INFERENCE_STEPS,
+                args.prompt,
+                height=args.height,
+                width=args.width,
+                guidance_scale=args.guidance_scale,
+                num_inference_steps=args.num_inference_steps,
                 max_sequence_length=512,
                 generator=generator,
             ).images[0]
-        output_path = os.path.join(output_dir, f"{TAG}_{get_prompt_id(PROMPT)}_seed{seed}.png")
+        output_path = os.path.join(output_dir, f"{TAG}_{prompt_id}_seed{seed}.png")
         image.save(output_path)
         print(f"Stored {output_path}!", flush=True)
 
@@ -90,13 +101,14 @@ def main() -> None:
         "method": TAG,
         "model_id": model_id,
         "model_path": model_path,
-        "prompt": PROMPT,
-        "height": HEIGHT,
-        "width": WIDTH,
-        "num_images": NUM_IMAGES,
-        "num_inference_steps": NUM_INFERENCE_STEPS,
-        "guidance_scale": GUIDANCE_SCALE,
-        "seeds": SEEDS,
+        "prompt": args.prompt,
+        "height": args.height,
+        "width": args.width,
+        "num_images": len(seeds),
+        "num_inference_steps": args.num_inference_steps,
+        "guidance_scale": args.guidance_scale,
+        "seeds": seeds,
+        "warmup_runs": max(0, int(args.warmup_runs)),
     }
     params_path = save_params_and_metrics(
         output_dir,
