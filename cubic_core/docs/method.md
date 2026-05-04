@@ -7,7 +7,7 @@
 3. 我们先在线估计这种局部直线度，再据此设计缓存粒度；
 4. 最后在给定计算预算下分配 block 更新间隔，并执行 selective token forward。
 
-注意：latex版本中，将Cubic替换为/cubic。完整推导，包括局部截断误差界、Lipschitz/Grönwall 修补以及闭式优化解的细节，统一放在 appendix。正文只保留最关键的定义和结论。
+注意：LaTeX 版本中，将 Cubic 替换为 `\cubic`。完整推导，包括局部截断误差界、Lipschitz/Grönwall 修补以及闭式优化解的细节，统一放在 appendix。正文只保留最关键的定义和结论。
 
 ---
 
@@ -72,40 +72,56 @@ $$
 
 这一步给出了 Cubic 后续所有决策的统一信号源。重要的是，monitor 并不直接决定哪个 token 被跳过；它提供的是一个 token-space risk map，后续的 partitioner 和 optimizer 在此基础上进一步决定缓存粒度与更新频率。
 
-长推导与与真实曲率的关系证明见 appendix。
+长推导以及与真实曲率的关系证明见 appendix。
 
 ---
 
 ## 3. Design Cache Granularity (Partitioner)
 
-### 3.1 From Token Curvature to Cache Granularity
+### 3.1 From Token Curvature to Morphology-guided Blocks
 
-有了 token-space curvature map 之后，下一个问题不是立刻给每个 token 分配独立更新周期，而是先确定缓存应该采用多粗的空间粒度。原因是 selective execution 的基本单元不是单个 token，而是共享缓存策略的一组 token。
+有了 token-space curvature map $\kappa \in \mathbb{R}^{F_t \times H_t \times W_t}$ 之后，下一个问题不是立刻给每个 token 分配独立更新周期，而是先确定缓存策略应该在哪些 token 组之间共享。原因是 selective execution 的实际调度单元是 block：同一 block 内 token 共享刷新间隔 $\tau_b$。
 
-因此，Cubic 在 token space 上定义 block partition，但 partition 本身也是自适应的：在每个 anchor step，我们从候选 block sizes 中选择一个全局 block size，然后在整个 token grid 上均匀平铺。换言之，**自适应的是粒度，均匀的是切分**。
-
-### 3.2 Selection Criterion
-
-对任意候选 block size $\mathbf{b}=(b_f,b_h,b_w)$，记其诱导的均匀分区为 $\mathcal{P}(\mathbf{b})=\{B_j(\mathbf{b})\}$。我们用块内 curvature 的变异系数衡量该粒度下的内部一致性：
+当前实现默认采用 **morphology-guided non-uniform partition**。直觉上，高曲率区域往往对应更需要精细更新的前景或局部细节，而低曲率区域可以使用更粗的缓存粒度。因此，Cubic 先将时间维平均后的空间曲率图
 
 $$
-\mathrm{cv}_j(\mathbf{b})
-=
-\frac{\mathrm{Std}(\{\kappa_i\}_{i \in B_j(\mathbf{b})})}
-{\mathrm{Mean}(\{\kappa_i\}_{i \in B_j(\mathbf{b})}) + \varepsilon}.
+\bar{\kappa}_{h,w} = \frac{1}{F_t}\sum_{f=1}^{F_t}\kappa_{f,h,w}
 $$
 
-我们的选择原则很简单：优先选择**块内曲率更一致**、同时**块尽可能大**的划分。实现上，这一准则通过 block-wise CV 的统计量来近似，包括 mean-CV 与 p90-CV；若某个候选已满足一致性阈值，则优先采用体积最大的 block size，否则退化为选择 p90-CV 最小的候选。
+转化为前景掩码，再基于该掩码生成非重叠的矩形 block。这样得到的分区不再要求全局统一 block size，而是在高曲率/混合区域自动细分，在低曲率背景区域保持较大 block。
+
+### 3.2 Morphological Partitioning
+
+具体地，Cubic 先根据 $\bar{\kappa}$ 的高分位阈值构造候选前景集合
+
+$$
+M_{h,w} = \mathbb{1}\!\left[\bar{\kappa}_{h,w} \ge
+\mathrm{Quantile}_{q_f}(\bar{\kappa})\right],
+$$
+
+其中 $q_f$ 是前景阈值分位数。随后对 $M$ 执行轻量的形态学清理，包括 opening、closing、dilation/erosion 以及小连通域过滤，得到更稳定的前景掩码 $\tilde{M}$。这些操作只用于稳定分区边界，不引入额外模型前向。
+
+在 $\tilde{M}$ 上，partitioner 从完整空间区域开始递归切分。若某个区域的前景比例处于混合区间、块内曲率 CV 超过阈值，或区域大小超过当前前景/背景目标粒度，则沿更优的空间轴继续二分；否则该区域成为一个 block。前景占比较高的区域使用更小目标粒度，背景占比较低的区域使用更大目标粒度。最终得到
+
+$$
+\mathcal{P}=\{B_b\}_{b=1}^{B}, \qquad
+\bigcup_{b=1}^{B} B_b = \Omega,\quad B_b \cap B_{b'}=\varnothing.
+$$
+
+这个设计保留了规则矩形 block 带来的索引与调度便利，同时允许缓存粒度随局部曲率结构自适应变化。实现中仍保留 uniform partition 作为 fallback 或显式配置选项；当缺少有效 curvature map 或 morphology 分区失败时，会退化到均匀切分。
 
 ### 3.3 Representative Block Curvature
 
-在确定分区后，我们需要把 token-wise curvature 汇聚成 block-wise 调度信号。当前实现中，我们不使用 block 内均值，而使用更保守的高分位数：
+在确定分区后，我们需要把 token-wise curvature 汇聚成 block-wise 调度信号。当前通用实现使用 block 内均值：
 
 $$
-\kappa_b = \mathrm{Quantile}_{q}\big(\{\kappa_i\}_{i \in B_b}\big), \qquad q \approx 0.9.
+\kappa_b
+=
+\frac{1}{|B_b|}
+\sum_{i \in B_b}\kappa_i .
 $$
 
-这样做的动机是避免大块中的少数高曲率 token 被均值“淹没”，从而降低过度跳步带来的局部失真风险。
+由于分区阶段已经倾向于把高曲率/混合区域切得更细，均值聚合可以作为稳定的 block-level 风险估计，并直接传递给后续 interval optimizer。
 
 ---
 
@@ -113,7 +129,7 @@ $$
 
 ### 4.1 Error Model
 
-一旦某个 block 在当前步完成刷新，我们在接下来若干步内复用其缓存输出，此处应该强调insight：等价于在局部时间窗口上对速度场应用 zero-order hold。为避免与前文的终点预测漂移 $\hat{\delta}_{i}^{(m)}$ 混淆，我们将 ZOH 引入的局部状态误差记为 $e_b$。对于 block $b$，若其曲率为 $\kappa_b$，跳过 $\tau_b$ 步带来的局部状态误差满足
+一旦某个 block 在当前步完成刷新，我们在接下来若干步内复用其缓存输出。这等价于在局部时间窗口上对速度场应用 zero-order hold。为避免与前文的终点预测漂移 $\hat{\delta}_{i}^{(m)}$ 混淆，我们将 ZOH 引入的局部状态误差记为 $e_b$。对于 block $b$，若其曲率为 $\kappa_b$，跳过 $\tau_b$ 步带来的局部状态误差满足
 
 $$
 \|e_{\tau_b}^{(b)}\|
@@ -125,19 +141,20 @@ $$
 
 ### 4.2 Budget-Constrained Interval Allocation
 
-接下来我们将 block 更新间隔的分配写成一个受预算约束的优化问题。令 $\rho$ 为目标加速比，$\tau_b$ 为 block $b$ 的更新间隔。我们将 block error parameterize 为
+接下来我们将 block 更新间隔的分配写成一个受预算约束的优化问题。令 $\rho$ 为目标加速比，$\tau_b$ 为 block $b$ 的更新间隔，$n_b=|B_b|$ 为该 block 的 token 数。我们将 block error parameterize 为
 
 $$
 \ell_b(\tau_b) \propto \kappa_b^\alpha \tau_b^\beta,
 $$
 
-并在平均更新率受限的条件下最小化总误差，即
+并在 token-weighted 平均更新率受限的条件下最小化总误差，即
 
 $$
 \min_{\tau_b \ge 1}\; \sum_{b=1}^{B} \kappa_b^\alpha \tau_b^\beta
 \qquad
 \text{s.t.}\quad
-\frac{1}{B}\sum_{b=1}^{B}\frac{1}{\tau_b} = \frac{1}{\rho}.
+\frac{\sum_{b=1}^{B} n_b/\tau_b}{\sum_{b=1}^{B} n_b}
+= \frac{1}{\rho}.
 $$
 
 其闭式最优解满足
@@ -154,7 +171,7 @@ $$
 
 这给出一个清晰结论：高曲率 block 应该更频繁刷新，低曲率 block 可以更长时间复用缓存。
 
-在实现中，我们进一步加入离散化、上下界裁剪以及目标 speedup 的重新归一化，使得到的 $\tau_b$ 为整数并尽量接近用户指定的加速比。完整推导与离散修正细节见 appendix。
+在实现中，我们进一步加入目标 speedup 的重新归一化、离散化以及合法值下界处理，使得到的 $\tau_b$ 为正整数并尽量接近用户指定的加速比。完整推导与离散修正细节见 appendix。
 
 ---
 

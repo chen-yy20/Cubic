@@ -1,0 +1,107 @@
+\section{Methodology}
+\label{sec:method}
+
+We present \cubic, a curvature-driven dynamic caching framework for FM generation. The core idea is to connect local trajectory geometry with runtime caching decisions: regions whose trajectories are locally straighter can tolerate more aggressive cache reuse, whereas regions with higher curvature should be refreshed more frequently. 
+
+\subsection{Overview of the Inference Pipeline}
+\label{sec:method_overview}
+
+Recall from Sec.~\ref{sec:motiv_theory} that caching intermediate features for $\tau$ steps is mathematically equivalent to extending the effective local integration step size by a factor of $\tau$. \cubic exploits the spatial heterogeneity of permissible step sizes by transforming the standard ODE solving process into an \textbf{anchor-selective inference loop}, as illustrated in Fig.~\ref{fig:overview}. 
+
+The pipeline alternates between two types of steps, stabilized by standard bootstrap and termination mechanisms (a few initial warmup and final cooldown full passes):
+\begin{itemize}
+    \item \textbf{Anchor Steps:} Full forward passes that act as the "brain" of the system. They refresh the exact velocity prediction for all tokens, measure the geometric properties of the trajectory, and dynamically re-evaluate the caching policy.
+    \item \textbf{Selective Steps:} Sparse DiT forward passes that act as the "muscle". They recompute only a dynamically chosen subset of tokens (active tokens), while the remaining tokens (frozen tokens) reuse cached intermediate states.
+\end{itemize}
+This anchor-selective decoupling divides the acceleration mechanism into two clean phases: \emph{estimation \& optimization} at anchor steps (Sec.~\ref{sec:anchor_step}), and \emph{sparse execution} at selective steps (Sec.~\ref{sec:selective_step}).
+
+\subsection{Operations at Anchor Steps: Estimation and Optimization}
+\label{sec:anchor_step}
+
+At each anchor step, \cubic must evaluate the local trajectory geometry and translate it into a concrete, budget-constrained caching schedule. This process consists of two sequential sub-tasks.
+
+\paragraph{Curvature Estimation and Spatial Partitioning}
+Directly computing local trajectory curvature is impractical due to the need for expensive Jacobian information. We therefore seek an online proxy that introduces lightweight system cost. Our key observation is that if a token trajectory is locally straight, its endpoint predicted by the current velocity field should remain nearly unchanged across successive observations. In contrast, trajectory curvature causes this endpoint prediction to drift.
+
+For a spatial token indexed by $i$, we define its endpoint prediction at time $t$ as
+\begin{equation}
+    \hat{x}_1^{(i)}(t) = x^{(i)}(t) + (1 - t)\, v_\theta^{(i)}(x(t), t).
+\end{equation}
+Let $\{t_{a_m}\}_{m=1}^{M}$ denote the anchor-step sequence. We define the endpoint prediction drift between two consecutive anchor observations as
+\begin{equation}
+    \hat{\delta}^{(i,m)} = \hat{x}_1^{(i)}(t_{a_m}) - \hat{x}_1^{(i)}(t_{a_{m-1}}).
+\end{equation}
+As rigorously derived in Appendix~\ref{app:curvature_proxy}, this drift scales proportionally to the local trajectory curvature $\kappa^{(i)}(t_{a_m})$, modulated by the remaining time horizon $(1-t_{a_m})$ and the step interval $\Delta t_{a_m} = |t_{a_m} - t_{a_{m-1}}|$. To obtain a robust, unit-free proxy, we normalize this drift:
+\begin{equation}
+    \hat{\kappa}^{(i)} = \left\|\hat{\delta}^{(i,m)}\right\|/((1-t_{a_m})\,\Delta t_{a_m}).
+\end{equation}
+We compute this proxy in latent space and aggregate it to the token grid, producing a token-space curvature map $\kappa \in \mathbb{R}^{F_t \times H_t \times W_t}.$ 
+Assigning an independent caching strategy to every individual token introduces prohibitive scheduling overhead. Therefore, we group spatially adjacent tokens into rectangular blocks $\{B_b\}$ that share a single update strategy. \cubic employs a lightweight morphological partitioning strategy (details in Appendix~\ref{app:parition}): we extract high-curvature foreground regions via thresholding, apply morphological refinements, and recursively bisect the grid. Since this inherently isolates high-curvature outliers into finer blocks, we simply aggregate the token-wise curvature using a spatial mean to form a robust block-wise score:
+\begin{equation}
+    \kappa_b = \frac{1}{|B_b|} \sum_{i \in B_b} \hat{\kappa}^{(i)}.
+\end{equation}
+
+\paragraph{Error Modeling and Interval Optimization}
+With the block-wise curvature $\kappa_b$, \cubic determines how long each block may safely reuse cached outputs. Consider a block $b$ fully recomputed at an anchor step $t_0$. If frozen for the subsequent $\tau_b$ steps, its state is updated using a constant cached velocity. This is mathematically equivalent to applying a \emph{zero-order hold (ZOH)} to the local velocity field. Let $x_{\text{exact}}^{(b)}(t)$ and $x_{\text{zoh}}^{(b)}(t)$ denote the exact and ZOH trajectories, respectively. We define the cache-induced truncation error at the end of the reuse window as:
+\begin{equation}
+    e_{\tau_b}^{(b)} = x_{\text{zoh}}^{(b)}(t_0 + \tau_b \Delta t) - x_{\text{exact}}^{(b)}(t_0 + \tau_b \Delta t).
+    \label{eq:error_def}
+\end{equation}
+As rigorously derived in Appendix~\ref{app:error_modeling}, this accumulated error is strictly controlled by the local trajectory curvature:
+\begin{equation}
+    \label{eq:error_bound}
+    \left\|e_{\tau_b}^{(b)}\right\| \lesssim \frac{1}{2}\,\kappa_b\,\tau_b^2\,\Delta t^2.
+\end{equation}
+
+We formalize interval allocation as a budget-constrained optimization problem. Let $\rho$ denote the target speedup and $\tau_b$ the update interval for block $b$. To penalize large local deviations, we minimize the expected squared error (MSE). By squaring the truncation error bound in Eq.~\ref{eq:error_bound}, the block-wise loss is parameterized as $\ell_b(\tau_b) \propto \kappa_b^\alpha \tau_b^\beta$, with theoretical defaults strictly set to $(\alpha,\beta)=(2,4)$. We minimize the total squared error under an average update-rate constraint:
+\begin{equation}
+    \min_{\tau_b \ge 1}\; \sum_{b=1}^{B} \kappa_b^\alpha \tau_b^\beta
+    \qquad
+    \text{s.t.}\quad
+    \frac{1}{B}\sum_{b=1}^{B}\frac{1}{\tau_b} = \frac{1}{\rho}.
+\end{equation}
+As derived in Appendix~\ref{app:optimal_interval}, the resulting closed-form optimum satisfies $\tau_b^\star \propto \kappa_b^{-\alpha/(\beta+1)}.$ Substituting $(\alpha,\beta)=(2,4)$ yields the final allocation rule:
+\begin{equation}
+    \tau_b^\star \propto \kappa_b^{-2/5}.
+\end{equation}
+Thus, \cubic naturally assigns shorter intervals to high-curvature blocks. In implementation, the continuous solution is discretized, clipped, and re-normalized to match $\rho$.
+
+\subsection{Operations at Selective Steps: Sparse DiT Execution}
+\label{sec:selective_step}
+
+Given the partition $\mathcal{P}$ and block intervals $\{\tau_b\}$ determined at the previous anchor step, the active blocks at selective step $k$ are defined as
+\begin{equation}
+    \mathcal{A}_k = \{ b \in \mathcal{P} \mid s_k \bmod \tau_b = 0 \},
+\end{equation}
+where $s_k$ is the local step index within the selective phase. This induces the active and frozen token sets:
+\begin{equation}
+    \Omega_k^{\mathrm{act}} = \bigcup_{b \in \mathcal{A}_k} B_b,
+    \qquad
+    \Omega_k^{\mathrm{frz}} = \Omega \setminus \Omega_k^{\mathrm{act}}.
+\end{equation}
+
+At each DiT layer, \cubic only computes the active tokens. To maintain full-sequence spatial dependencies without recomputing frozen tokens, the attention mechanism queries against a reconstructed full sequence. Specifically, the newly computed Key/Value (KV) tensors for active tokens are concatenated with the cached KV tensors of frozen tokens:
+\begin{equation}
+    K_\ell^{\mathrm{full}} = K_\ell^{\mathrm{act}} \oplus K_\ell^{\mathrm{frz}}, \quad
+    V_\ell^{\mathrm{full}} = V_\ell^{\mathrm{act}} \oplus V_\ell^{\mathrm{frz}}.
+\end{equation}
+Attention is then evaluated as:
+\begin{equation}
+    Y_\ell^{\mathrm{act}} =
+    \mathrm{Attn}\!\left(
+    Q_\ell^{\mathrm{act}},
+    K_\ell^{\mathrm{full}},
+    V_\ell^{\mathrm{full}}
+    \right).
+\end{equation}
+Crucially, after the attention computation, \cubic writes this updated $K_\ell^{\mathrm{full}}$ and $V_\ell^{\mathrm{full}}$ back to the per-layer KV cache. This selective in-place cache update ensures that the cached KV states progressively incorporate the latest cross-token interactions across layers, rather than remaining strictly static.
+
+The final output of the selective step is formed by merging newly computed active-token outputs with cached frozen-token outputs:
+\begin{equation}
+    v_k(\Omega) =
+    \mathrm{Merge}\!\left(
+        v_k^{\mathrm{act}}(\Omega_k^{\mathrm{act}}),
+        v_{k-1,\mathrm{cache}}(\Omega_k^{\mathrm{frz}})
+    \right).
+\end{equation}
+This selective forward engine is the component that actually yields computational savings: active tokens traverse the full DiT computation path, whereas frozen tokens participate only through cache reuse. To ensure robustness, if the required caches are not initialized, the runtime automatically falls back to a full forward pass.
