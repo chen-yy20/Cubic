@@ -1,3 +1,6 @@
+# 好耶 🎉！CuBic已经被NIPS2026接收啦！
+我们是最棒的！
+
 # cubic
 
 本仓库用于统一管理多模型推理实验（origin / cubic），当前支持通过 `launch.py` 启动 WAN、Flux1、FireRed、Flux2-klein 等实验脚本。
